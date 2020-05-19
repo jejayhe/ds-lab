@@ -26,10 +26,11 @@ type MapTaskInfo struct {
 }
 
 type ReduceTaskInfo struct {
-	Id        int
-	Filenames []string
-	Status    string
-	ProcessAt *time.Time
+	Id         int
+	Filenames  []string
+	AssignedTo int
+	Status     string
+	ProcessAt  *time.Time
 }
 type MapTask struct {
 	Id       int
@@ -78,6 +79,16 @@ func (m *Master) IsMapFinished() bool {
 			return false
 		}
 	}
+	//m.done = true
+	return true
+}
+
+func (m *Master) IsReduceFinished() bool {
+	for _, taskinfo := range m.ReduceFileMap {
+		if taskinfo.Status != "finish" {
+			return false
+		}
+	}
 	m.done = true
 	return true
 }
@@ -109,26 +120,27 @@ func (m *Master) GetTask(req *GetTaskReq, resp *GetTaskResp) error {
 	// for testing
 	//m.mutex.Unlock()
 	//resp.Done = true
-	//if len(m.ReducerFiles) != 0 || len(m.ReducerInProcess) != 0 {
-	//	// reduce phase
-	//	if len(m.ReducerFiles) != 0 {
-	//		file := m.ReducerFiles[0]
-	//		m.ReducerFiles = m.ReducerFiles[1:]
-	//		m.ReducerInProcess = append(m.ReducerInProcess, &InProcessTask{
-	//			Filename:file,
-	//			WorkerId: req.WorkerId,
-	//			StartTime: time.Now(),
-	//		})
-	//		m.mutex.Unlock()
-	//		resp.File = file
-	//		resp.Type = "reduce"
-	//		return nil
-	//	} else {
-	//		// waiting for some reducer to finish
-	//		m.mutex.Unlock()
-	//		return nil
-	//	}
-	//}
+	if len(m.ReduceTasks) != 0 || !m.IsReduceFinished() {
+		// reduce phase
+		if len(m.ReduceTasks) != 0 {
+			taskId := m.ReduceTasks[0]
+			m.ReduceTasks = m.ReduceTasks[1:]
+			now := time.Now()
+			taskinfo := m.ReduceFileMap[taskId]
+			taskinfo.ProcessAt = &now
+			taskinfo.AssignedTo = req.WorkerId
+			taskinfo.Status = "processing"
+			m.mutex.Unlock()
+			resp.TaskId = taskId
+			resp.Files = taskinfo.Filenames
+			resp.Type = "reduce"
+			return nil
+		} else {
+			// waiting for some reducer to finish
+			m.mutex.Unlock()
+			return nil
+		}
+	}
 	m.mutex.Unlock()
 	resp.Done = m.done
 	return nil
@@ -149,13 +161,34 @@ func (m *Master) ReportTask(req *ReportTaskReq, resp *ReportTaskResp) error {
 			}
 			m.mutex.Unlock()
 			return nil
+		} else if req.Type == "reduce" {
+			m.mutex.Lock()
+			if m.ReduceFileMap[req.TaskId].Status != "finish" {
+				m.ReduceTasks = append(m.ReduceTasks, req.TaskId)
+				taskinfo := m.ReduceFileMap[req.TaskId]
+				taskinfo.Status = "idle"
+				taskinfo.AssignedTo = -1
+				taskinfo.ProcessAt = nil
+				m.mutex.Unlock()
+				return nil
+			}
+			m.mutex.Unlock()
+			return nil
 		}
 	} else {
-		m.mutex.Lock()
-		taskinfo := m.MapFileMap[req.TaskId]
-		taskinfo.Status = "finish"
-		m.mutex.Unlock()
-		return nil
+		if req.Type == "map" {
+			m.mutex.Lock()
+			taskinfo := m.MapFileMap[req.TaskId]
+			taskinfo.Status = "finish"
+			m.mutex.Unlock()
+			return nil
+		} else if req.Type == "reduce" {
+			m.mutex.Lock()
+			taskinfo := m.ReduceFileMap[req.TaskId]
+			taskinfo.Status = "finish"
+			m.mutex.Unlock()
+			return nil
+		}
 	}
 	return nil
 }
@@ -170,9 +203,24 @@ func (m *Master) CheckJobStatus() {
 				if taskinfo.ProcessAt == nil {
 					log.Fatal("unknown situation")
 				}
-				if time.Now().Add(-5 * time.Second).After(*taskinfo.ProcessAt) {
+				if time.Now().Add(-10 * time.Second).After(*taskinfo.ProcessAt) {
 					m.MapTasks = append(m.MapTasks, i)
 					fmt.Printf("recycling map task: %d from worker %d \n", i, taskinfo.AssignedTo)
+					taskinfo.ProcessAt = nil
+					taskinfo.Status = "idle"
+					taskinfo.AssignedTo = -1
+				}
+			}
+		}
+
+		for i, taskinfo := range m.ReduceFileMap {
+			if taskinfo.Status == "processing" {
+				if taskinfo.ProcessAt == nil {
+					log.Fatal("unknown situation")
+				}
+				if time.Now().Add(-5 * time.Second).After(*taskinfo.ProcessAt) {
+					m.ReduceTasks = append(m.ReduceTasks, i)
+					fmt.Printf("recycling reduce task: %d from worker %d \n", i, taskinfo.AssignedTo)
 					taskinfo.ProcessAt = nil
 					taskinfo.Status = "idle"
 					taskinfo.AssignedTo = -1
@@ -233,6 +281,21 @@ func MakeMaster(files []string, nReduce int) *Master {
 			ProcessAt:  nil,
 		}
 		m.MapTasks = append(m.MapTasks, i)
+	}
+
+	for i := 0; i < nReduce; i++ {
+		m.ReduceTasks = append(m.ReduceTasks, i)
+		filenames := make([]string, 0)
+		for j := 0; j < len(files); j++ {
+			filenames = append(filenames, fmt.Sprintf("mr-%d-%d", j, i))
+		}
+		m.ReduceFileMap[i] = &ReduceTaskInfo{
+			Id:         i,
+			Filenames:  filenames,
+			AssignedTo: -1,
+			Status:     "idle",
+			ProcessAt:  nil,
+		}
 	}
 	go m.CheckJobStatus()
 	// Your code here.

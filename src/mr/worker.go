@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"time"
 )
 import "log"
@@ -18,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -88,7 +97,7 @@ func GetTask() *GetTaskResp {
 	req := GetTaskReq{WorkerId: WorkerId}
 	resp := GetTaskResp{}
 	call("Master.GetTask", &req, &resp)
-	fmt.Printf("worker %d receives %s task: %s status: %v \n", WorkerId, resp.Type, resp.File, resp.Done)
+	fmt.Printf("worker %d receives %s task: %s %s status: %v \n", WorkerId, resp.Type, resp.File, resp.Files, resp.Done)
 	return &resp
 }
 
@@ -108,7 +117,11 @@ func Cycle() {
 		if resp.Done {
 			break
 		}
-		if resp.File == "" {
+		if resp.Type == "map" && resp.File == "" {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if resp.Type == "reduce" && resp.Files == nil {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -120,7 +133,15 @@ func Cycle() {
 			} else {
 				ReportTask("map", resp.TaskId, true)
 			}
+		case "reduce":
+			err := DoReduce(resp.Files, resp.TaskId)
+			if err != nil {
+				ReportTask("reduce", resp.TaskId, false)
+			} else {
+				ReportTask("reduce", resp.TaskId, true)
+			}
 		}
+
 	}
 }
 func DoMap(filename string, mapTaskId int) error {
@@ -141,9 +162,9 @@ func DoMap(filename string, mapTaskId int) error {
 		immediate_file_name := fmt.Sprintf("mr-%d-%d", mapTaskId, i)
 		immediate_file_names = append(immediate_file_names, immediate_file_name)
 		//fd, err:=os.Create(immediate_file_name)
-		tfd, _ := ioutil.TempFile(".", "")
+		tfd, err := ioutil.TempFile(".", "")
 		if err != nil {
-			log.Fatalf("cannot open %v", immediate_file_name)
+			log.Fatalf("cannot open temp file")
 		}
 		tfds = append(tfds, tfd)
 		enc := json.NewEncoder(tfd)
@@ -160,6 +181,54 @@ func DoMap(filename string, mapTaskId int) error {
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func DoReduce(filenames []string, reduceTaskId int) error {
+	kva := make([]KeyValue, 0)
+	for _, filename := range filenames {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	intermediate := kva
+	sort.Sort(ByKey(intermediate))
+	tfd, err := ioutil.TempFile(".", "")
+	if err != nil {
+		log.Fatalf("cannot open temp file")
+	}
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := Reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(tfd, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+	tfd.Close()
+	err = os.Rename(tfd.Name(), fmt.Sprintf("mr-out-%d", reduceTaskId))
+	if err != nil {
+		return err
 	}
 	return nil
 }

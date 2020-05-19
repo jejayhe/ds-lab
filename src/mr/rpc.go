@@ -36,6 +36,7 @@ type GetTaskReq struct {
 type GetTaskResp struct {
 	Type   string // "map" "reduce"
 	File   string
+	Files  []string
 	TaskId int
 	Done   bool // if true, worker can exit
 }
