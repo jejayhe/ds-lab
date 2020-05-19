@@ -117,12 +117,8 @@ func Cycle() {
 		if resp.Done {
 			break
 		}
-		if resp.Type == "map" && resp.File == "" {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		if resp.Type == "reduce" && resp.Files == nil {
-			time.Sleep(100 * time.Millisecond)
+		if resp.File == "" && resp.Files == nil {
+			time.Sleep(1000 * time.Millisecond)
 			continue
 		}
 		switch resp.Type {
