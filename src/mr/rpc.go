@@ -22,8 +22,24 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+type GetNextIndexReq struct {
+}
+type GetNextIndexResp struct {
+	Index   int
+	NReduce int
+}
 
+type GetTaskReq struct {
+	WorkerId int
+}
+
+type GetTaskResp struct {
+	Type string // "map" "reduce"
+	File string
+	Done bool // if true, worker can exit
+}
+
+// Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.

@@ -5,7 +5,6 @@ import "log"
 import "net/rpc"
 import "hash/fnv"
 
-
 //
 // Map functions return a slice of KeyValue.
 //
@@ -24,6 +23,8 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+var WorkerIndex int
+var NReduce int
 
 //
 // main/mrworker.go calls this function.
@@ -34,8 +35,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the master.
-	// CallExample()
-
+	//CallExample()
+	GetNextIndex()
 }
 
 //
@@ -61,6 +62,15 @@ func CallExample() {
 	fmt.Printf("reply.Y %v\n", reply.Y)
 }
 
+func GetNextIndex() {
+	req := GetNextIndexReq{}
+	resp := GetNextIndexResp{}
+	call("Master.GetNextIndex", &req, &resp)
+	WorkerIndex = resp.Index
+	fmt.Printf("worker %d starts-------\n", WorkerIndex)
+	NReduce = resp.NReduce
+}
+
 //
 // send an RPC request to the master, wait for the response.
 // usually returns true.
@@ -69,6 +79,7 @@ func CallExample() {
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := masterSock()
+	fmt.Printf("sockname is: %v \n", sockname)
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)

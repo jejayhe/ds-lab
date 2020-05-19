@@ -1,15 +1,29 @@
 package mr
 
-import "log"
+import (
+	"log"
+	"time"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "sync"
 
-
+type InProcessTask struct {
+	Filename    string
+	WorkerIndex int
+	StartTime   time.Time
+}
 type Master struct {
-	// Your definitions here.
-
+	NextIndex        int
+	MapperFiles      []string
+	NReduce          int
+	MapperInProcess  []InProcessTask
+	ReducerFiles     []string
+	ReducerInProcess []InProcessTask
+	Phase            string // "map" "reduce"
+	mutex            sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -24,6 +38,56 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (m *Master) GetNextIndex(req *GetNextIndexReq, resp *GetNextIndexResp) error {
+	m.mutex.Lock()
+	index := m.NextIndex
+	m.NextIndex++
+	m.mutex.Unlock()
+	resp.Index = index
+	resp.NReduce = m.NReduce
+	return nil
+}
+
+func (m *Master) GetTask(req *GetTaskReq, resp *GetTaskResp) error {
+	// assigns task to workerId
+	m.mutex.Lock()
+	if len(m.MapperFiles) != 0 || len(m.MapperInProcess) != 0 {
+		// map phase
+		if len(m.MapperFiles) != 0 {
+			file := m.MapperFiles[0]
+			m.MapperFiles = m.MapperFiles[1:]
+			m.mutex.Unlock()
+			resp.File = file
+			resp.Type = "map"
+			return nil
+		} else {
+			// waiting for some mapper to finish
+			m.mutex.Unlock()
+			return nil
+		}
+	}
+	// for testing
+	m.mutex.Unlock()
+	resp.Done = true
+	if len(m.ReducerFiles) != 0 || len(m.ReducerInProcess) != 0 {
+		// reduce phase
+		if len(m.ReducerFiles) != 0 {
+			file := m.ReducerFiles[0]
+			m.ReducerFiles = m.ReducerFiles[1:]
+			m.mutex.Unlock()
+			resp.File = file
+			resp.Type = "reduce"
+			return nil
+		} else {
+			// waiting for some reducer to finish
+			m.mutex.Unlock()
+			return nil
+		}
+	}
+	m.mutex.Unlock()
+	resp.Done = true
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +114,6 @@ func (m *Master) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -60,10 +123,13 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{
+		NextIndex:   0,
+		MapperFiles: files,
+		NReduce:     nReduce,
+	}
 
 	// Your code here.
-
 
 	m.server()
 	return &m
