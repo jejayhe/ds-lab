@@ -34,9 +34,20 @@ type GetTaskReq struct {
 }
 
 type GetTaskResp struct {
-	Type string // "map" "reduce"
-	File string
-	Done bool // if true, worker can exit
+	Type   string // "map" "reduce"
+	File   string
+	TaskId int
+	Done   bool // if true, worker can exit
+}
+
+type ReportTaskReq struct {
+	Type    string // "map" "reduce"
+	Files   []string
+	TaskId  int
+	Success bool
+}
+
+type ReportTaskResp struct {
 }
 
 // Add your RPC definitions here.
