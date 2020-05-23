@@ -17,14 +17,16 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
 import "sync/atomic"
 import "../labrpc"
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -54,6 +56,20 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
+	// 2A
+	leaderId        int
+	electionTimeout time.Time
+
+	currentTerm int
+	votedFor    int
+	log         []string
+
+	commitIndex int
+	lastApplied int
+
+	nextIndex  []int
+	matchIndex []int
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -66,6 +82,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader = rf.leaderId == rf.me
 	return term, isleader
 }
 
@@ -84,7 +104,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -108,15 +127,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -125,6 +145,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -132,6 +154,64 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	} else if args.Term > rf.currentTerm {
+		// todo
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		// todo: need to check log
+		reply.Term = args.Term
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+	}
+	return
+}
+
+type AppendEntriesArgs struct{}
+
+type AppendEntriesReply struct{}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// receiver resets election timeout
+	rf.resetElectionTimeout()
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	electionTimeout := (rand.Intn(200) + 250) * 1e6
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.electionTimeout = time.Now().Add(time.Duration(electionTimeout))
+	return
+}
+
+func (rf *Raft) checkElectionTimeout() {
+	for {
+		rf.mu.Lock()
+		if time.Now().Before(rf.electionTimeout) {
+			rf.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		rf.currentTerm++
+		arg := &RequestVoteArgs{
+			Term:         rf.currentTerm,
+			CandidateId:  rf.me,
+			LastLogIndex: -1,
+			LastLogTerm:  -1,
+		}
+		reply := &RequestVoteReply{}
+		rf.mu.Unlock()
+		go func() {
+			rf.sendRequestVote(0, arg, reply)
+		}()
+	}
 }
 
 //
@@ -168,7 +248,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -189,7 +268,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -235,9 +313,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 
+	// 2A
+	rf.votedFor = -1
+	rf.currentTerm = 0
+	rf.leaderId = -1
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+	rf.resetElectionTimeout()
+	// no heartbeat
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
