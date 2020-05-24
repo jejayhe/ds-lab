@@ -349,9 +349,13 @@ func (cfg *config) checkTerms() int {
 
 // check that there's no leader
 func (cfg *config) checkNoLeader() {
+	DPrintf("[TEST] checkNoLeader-------------------")
 	for i := 0; i < cfg.n; i++ {
+		_, is_leader := cfg.rafts[i].GetState()
+		DPrintf("[TEST] server %d is_leader %v---------", i, is_leader)
 		if cfg.connected[i] {
 			_, is_leader := cfg.rafts[i].GetState()
+			DPrintf("[TEST] server %d is_leader %v---------", i, is_leader)
 			if is_leader {
 				cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
 			}
