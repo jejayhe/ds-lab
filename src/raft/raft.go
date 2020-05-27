@@ -210,11 +210,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	// todo valid request should result in timeout clearance
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		rf.resetElectionTimeout_Enclosed()
-		// todo: need to check log
-		reply.Term = args.Term
-		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
+		//2B compare log
+		myLastLogIndex := len(rf.log) - 1
+		myLastLogTerm := rf.log[myLastLogIndex].Term
+		if args.LastLogTerm > myLastLogTerm || (args.LastLogTerm == myLastLogTerm && args.LastLogIndex >= myLastLogIndex) {
+			rf.resetElectionTimeout_Enclosed()
+			// todo: need to check log
+			reply.Term = args.Term
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
+		}
 	}
 	return
 }
@@ -333,7 +338,7 @@ func (rf *Raft) resetElectionTimeout() {
 }
 
 func (rf *Raft) checkElectionTimeout() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state == State_Leader {
 			rf.mu.Unlock()
@@ -353,7 +358,7 @@ func (rf *Raft) checkElectionTimeout() {
 
 // if I am leader, send heartbeat to others
 func (rf *Raft) monitorLeaderStatus() {
-	for {
+	for !rf.killed() {
 		select {
 		case <-rf.leaderChan:
 			// todo init nextIndex, matchIndex
@@ -408,7 +413,7 @@ func (rf *Raft) sendSingleHeartBeat(me int, idx int, oldTerm int) {
 	rf.mu.Unlock()
 }
 func (rf *Raft) sendHeartBeatTo(me int, idx int, oldTerm int) {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != State_Leader {
 			rf.mu.Unlock()
@@ -435,7 +440,7 @@ func (rf *Raft) leaderHeartbeatJob() {
 }
 
 func (rf *Raft) replicateLogTo(idx int) {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != State_Leader {
 			rf.mu.Unlock()
@@ -632,8 +637,9 @@ func (rf *Raft) startCampaignForSelf() {
 
 	tmpTerm := rf.currentTerm
 	tmpCandidateId := rf.me
-	tmpLastLogIndex := 0
-	tmpLastLogTerm := 0
+	lenLog := len(rf.log)
+	tmpLastLogIndex := lenLog - 1
+	tmpLastLogTerm := rf.log[lenLog-1].Term
 
 	n := len(rf.peers)
 	rf.mu.Unlock()
