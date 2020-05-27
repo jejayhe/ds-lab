@@ -65,15 +65,21 @@ type Raft struct {
 	leaderChan       chan int
 	followerLastResp []int64 // record follower last show up timestamp, this information is for leader
 
-	currentTerm int     // init to 0
-	votedFor    int     // -1 to represent nil
-	log         []Entry // first index is 1
+	currentTerm int      // init to 0
+	votedFor    int      // -1 to represent nil
+	log         []*Entry // first index is 1
+	//logIndex int // init to 0
 
 	commitIndex int // init to 0
 	lastApplied int // init to 0
 
 	nextIndex  []int // init to last log index +1
 	matchIndex []int // initialize to 0
+
+	// 2B
+	applyCh chan ApplyMsg
+	//lastLogIndex int
+	logSyncedMap map[int]bool // indicate a follower's log is synced or not. for leader use
 
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -106,21 +112,21 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = rf.state == State_Leader
 	// if leader's follower haven't shown up recently then it's not legit leader
-	if isleader {
-		acc := 1
-		nowUnixNano := time.Now().UnixNano()
-		var heartbeatTimeout int64 = 1e9
-		for i, val := range rf.followerLastResp {
-			if i != rf.me {
-				if nowUnixNano-val < heartbeatTimeout {
-					acc++
-				}
-			}
-		}
-		if acc*2 <= len(rf.peers) {
-			isleader = false
-		}
-	}
+	//if isleader {
+	//	acc := 1
+	//	nowUnixNano := time.Now().UnixNano()
+	//	var heartbeatTimeout int64 = 1e9
+	//	for i, val := range rf.followerLastResp {
+	//		if i != rf.me {
+	//			if nowUnixNano-val < heartbeatTimeout {
+	//				acc++
+	//			}
+	//		}
+	//	}
+	//	if acc*2 <= len(rf.peers) {
+	//		isleader = false
+	//	}
+	//}
 
 	return term, isleader
 }
@@ -218,11 +224,15 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []Entry
+	Entries      []*Entry
 	LeaderCommit int
 }
 
-type Entry struct{}
+type Entry struct {
+	//Index int
+	Command interface{}
+	Term    int
+}
 
 type AppendEntriesReply struct {
 	Term    int
@@ -240,6 +250,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.updateTerm(args.Term)
 		rf.leaderId = args.LeaderId
 	}
+	// 2B
+	if args.Entries != nil {
+		// local log too few, refuse, need a smaller prevLogIndex
+		if args.PrevLogIndex >= len(rf.log) {
+			DPrintf("[WARNING] too few local log ")
+		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			DPrintf("[WARNING] PrevLogTerm doesn't match")
+			// delete existing entry and all that follow it
+		} else {
+			// normal op, delete existing entry and all that follow it
+			DPrintf("[RECEIVE LOG] receive %d logs on server %d", len(args.Entries), rf.me)
+			rf.log = append(rf.log, args.Entries...)
+			reply.Term = rf.currentTerm
+			reply.Success = true
+		}
+	}
+
 	rf.resetElectionTimeout_Enclosed()
 	rf.mu.Unlock()
 	// receiver resets election timeout
@@ -287,6 +314,12 @@ func (rf *Raft) monitorLeaderStatus() {
 		select {
 		case <-rf.leaderChan:
 			// todo init nextIndex, matchIndex
+			n := len(rf.peers)
+			lastLogIndex := len(rf.log) - 1
+			for i := 0; i < n; i++ {
+				rf.nextIndex[i] = lastLogIndex + 1
+				rf.matchIndex[i] = 0
+			}
 			rf.followerLastResp = make([]int64, len(rf.peers))
 			// if become leader, will send out heartbeat
 			rf.leaderHeartbeatJob()
@@ -300,24 +333,26 @@ func (rf *Raft) sendSingleHeartBeat(me int, idx int, oldTerm int) {
 	}
 	reply := &AppendEntriesReply{}
 	//DPrintf("prepare to send heartbeat from server %d to server %d oldTerm %d", me, idx, oldTerm)
-	requestTime := time.Now().UnixNano()
-	ok := rf.sendAppendEntries(idx, args, reply)
+	//requestTime := time.Now().UnixNano()
+	//ok := rf.sendAppendEntries(idx, args, reply)
+
+	rf.sendAppendEntries(idx, args, reply)
 	//DPrintf("after send heartbeat from server %d to server %d oldTerm %d result %v", me, idx, oldTerm, ok)
 	rf.mu.Lock()
 	// update followerLastResp
-	if ok && requestTime > rf.followerLastResp[idx] {
-		rf.followerLastResp[idx] = requestTime
-	}
+	//if ok && requestTime > rf.followerLastResp[idx] {
+	//	rf.followerLastResp[idx] = requestTime
+	//}
 
 	if rf.currentTerm < reply.Term {
-		DPrintf("server %d to %d heartbeat exiting method 1... \n", rf.me, idx)
+		//DPrintf("server %d to %d heartbeat exiting method 1... \n", rf.me, idx)
 		rf.updateTerm(reply.Term)
 		rf.mu.Unlock()
 		return
 	}
 	// if no longer the leader or term change, exit.
 	if rf.state != State_Leader || rf.leaderId != rf.me || rf.currentTerm != oldTerm {
-		DPrintf("server %d to %d heartbeat exiting method 2... \n", rf.me, idx)
+		//DPrintf("server %d to %d heartbeat exiting method 2... \n", rf.me, idx)
 		rf.mu.Unlock()
 		return
 	}
@@ -345,8 +380,71 @@ func (rf *Raft) leaderHeartbeatJob() {
 	for i := 0; i < n; i++ {
 		if i != me {
 			go rf.sendHeartBeatTo(me, i, oldTerm)
+			go rf.replicateLogTo(i)
 		}
 	}
+}
+
+func (rf *Raft) replicateLogTo(idx int) {
+	for {
+		rf.mu.Lock()
+		if rf.state != State_Leader {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+		rf.syncLog(idx)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+func (rf *Raft) syncLog(idx int) {
+	rf.mu.Lock()
+	/*
+		at first,
+	*/
+
+	// no new log
+	if len(rf.log)-1 < rf.nextIndex[idx] {
+		rf.mu.Unlock()
+		return
+	}
+	/*
+		init state, first log
+		nextIndex = 1
+		matchIndex = 0
+		term = 1
+		lastLogIndex = 1
+		prevLogIndex = 0
+		prevLogTerm = 0
+		Entries = first entry
+		commitIndex = 0
+
+	*/
+	lastLogIndex := len(rf.log) - 1
+	entries := rf.log[rf.nextIndex[idx]:]
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: rf.nextIndex[idx] - 1,
+		PrevLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
+		Entries:      entries,
+		//Entries:      []*Entry{rf.log[rf.nextIndex[idx]]},
+		LeaderCommit: rf.commitIndex,
+	}
+	DPrintf("[REPLICATE] send %d logs from server %d to server %d", len(entries), rf.me, idx)
+	rf.mu.Unlock()
+	reply := &AppendEntriesReply{}
+
+	rf.sendAppendEntries(idx, args, reply)
+	// if fail, decrement nextIndex, and retry
+
+	// assume logs are synced
+	if reply.Success {
+		rf.nextIndex[idx] = lastLogIndex
+		// increment commitIndex
+		// find top (n-1)/2, which is the commit index.
+	}
+
 }
 
 // enclosed in mutex
@@ -491,13 +589,63 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+func (rf *Raft) logReplicate(command interface{}) {
+	rf.mu.Lock()
+	commitIndex := rf.commitIndex
+
+	term := rf.currentTerm
+	me := rf.me
+	args := &AppendEntriesArgs{
+		Term:     term,
+		LeaderId: me,
+		//PrevLogTerm:,
+		//PrevLogIndex:,
+		Entries:      nil,
+		LeaderCommit: commitIndex,
+	}
+
+	rf.mu.Unlock()
+	reply := &AppendEntriesReply{}
+	n := len(rf.peers)
+	// todo if last log index >= nextIndex, send
+
+	for i := 0; i < n; i++ {
+		if i != me {
+			go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+				rf.sendAppendEntries(i, args, reply)
+				if reply.Success {
+
+				}
+			}(i, args, reply)
+		}
+	}
+	// if half returns ok, then commit
+	// commit will be done in heartbeat.
+}
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-
+	rf.mu.Lock()
 	// Your code here (2B).
+	if rf.state != State_Leader {
+		rf.mu.Unlock()
+		isLeader = false
+	} else {
+		//commitIndex:=rf.commitIndex
+		index = rf.commitIndex + 1
+		term = rf.currentTerm
+		// todo go send AE rpc to others.
+		//rf.logIndex++
+		rf.log = append(rf.log, &Entry{
+			//Index: rf.logIndex,
+			Command: command,
+			Term:    rf.currentTerm,
+		})
 
+		rf.mu.Unlock()
+
+	}
 	return index, term, isLeader
 }
 
@@ -536,6 +684,7 @@ func (rf *Raft) killed() bool {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu.Lock()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -546,14 +695,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.currentTerm = 0
 	rf.leaderId = -1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.state = State_Follower
 	rf.leaderChan = make(chan int)
-	rf.resetElectionTimeout()
+	go rf.resetElectionTimeout()
 	go rf.checkElectionTimeout()
 	go rf.monitorLeaderStatus()
 
+	// 2B
+	rf.applyCh = applyCh
+	n := len(peers)
+	rf.nextIndex = make([]int, n)
+	rf.matchIndex = make([]int, n)
+	rf.logSyncedMap = make(map[int]bool)
+	for i := 0; i < n; i++ {
+		// todo for testing purpose
+		// assume log are synced
+		rf.logSyncedMap[i] = true
+		//rf.nextIndex[i] = 1
+		//rf.matchIndex[i] = 0
+	}
+	rf.log = make([]*Entry, 0)
+	rf.log = append(rf.log, &Entry{
+		Command: nil,
+		Term:    0,
+	})
+
+	rf.mu.Unlock()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
