@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
@@ -26,7 +27,7 @@ import "sync/atomic"
 import "../labrpc"
 
 // import "bytes"
-// import "../labgob"
+import "../labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -145,6 +146,18 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	//rf.mu.Lock()
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	//rf.mu.Unlock()
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -167,6 +180,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []*Entry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		DPrintf("[ERROR] readPersist")
+	} else {
+		rf.mu.Lock()
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -219,6 +248,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Term = args.Term
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
+			rf.persist()
 		}
 	}
 	return
@@ -288,9 +318,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if args.Entries != nil {
 				DPrintf("[RECEIVE LOG] receive %d logs on server %d", len(args.Entries), rf.me)
 				rf.log = append(rf.log, args.Entries...)
+				rf.persist()
 			} else {
 				DPrintf("[SYNCING] cut log to index %d", args.PrevLogIndex)
 				rf.log = rf.log[:args.PrevLogIndex+1]
+				rf.persist()
 			}
 			reply.Term = rf.currentTerm
 			reply.Success = true
@@ -613,6 +645,7 @@ func (rf *Raft) updateTerm(newterm int) {
 		rf.currentTerm, newterm, stateNameMap[rf.state], stateNameMap[State_Follower])
 	rf.currentTerm = newterm
 	rf.votedFor = -1
+	rf.persist()
 	rf.state = State_Follower
 	rf.resetElectionTimeout_Enclosed()
 }
@@ -630,6 +663,7 @@ func (rf *Raft) startCampaignForSelf() {
 	rf.currentTerm++
 	DPrintf("[CAMPAIGN] server %d at term %d start campaign\n", rf.me, rf.currentTerm)
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.voteCount = 1
 	rf.voteMap = make(map[int]bool)
 	me := rf.me
@@ -771,6 +805,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 			Term:    rf.currentTerm,
 		})
+		rf.persist()
 
 		rf.mu.Unlock()
 
