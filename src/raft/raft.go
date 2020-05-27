@@ -282,6 +282,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				CommandIndex: j,
 			}
 		}
+		rf.commitIndex = newCommitIndex
 	}
 
 	rf.resetElectionTimeout_Enclosed()
@@ -471,6 +472,9 @@ func (rf *Raft) syncLog(idx int) {
 		rf.mu.Lock()
 		// enumerate N
 		N := nextIndex
+		if N < rf.commitIndex {
+			N = rf.commitIndex + 1
+		}
 		for N <= lastLogIndex {
 			// count how many matchIndex larger than N
 			acc := 0
@@ -483,7 +487,7 @@ func (rf *Raft) syncLog(idx int) {
 			}
 			if acc+1 > len(rf.peers)/2 {
 				rf.commitIndex = N
-				DPrintf("[LEADER COMMIT] server %d commit log %d", rf.me, N)
+				DPrintf("[LEADER COMMIT] server %d commit log %d command %v", rf.me, N, rf.log[N].Command)
 				rf.applyCh <- ApplyMsg{
 					Command:      rf.log[N].Command,
 					CommandValid: true,
@@ -685,10 +689,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 	} else {
 		//commitIndex:=rf.commitIndex
-		index = rf.commitIndex + 1
+		index = len(rf.log)
 		term = rf.currentTerm
 		// todo go send AE rpc to others.
 		//rf.logIndex++
+		DPrintf("[START CMD] %v", command)
 		rf.log = append(rf.log, &Entry{
 			//Index: rf.logIndex,
 			Command: command,

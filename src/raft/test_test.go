@@ -265,6 +265,7 @@ loop:
 			go func(i int) {
 				defer wg.Done()
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
+				DPrintf("[DEBUG] start returns i = %d", i)
 				if term1 != term {
 					return
 				}
@@ -288,8 +289,10 @@ loop:
 		failed := false
 		cmds := []int{}
 		for index := range is {
+			DPrintf("[DEBUG] index= %d", index)
 			cmd := cfg.wait(index, servers, term)
 			if ix, ok := cmd.(int); ok {
+				DPrintf("[DEBUG] cmd[%d]= %d", index, ix)
 				if ix == -1 {
 					// peers have moved on to later terms
 					// so we can't expect all Start()s to
