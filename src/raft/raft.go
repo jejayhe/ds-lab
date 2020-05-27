@@ -266,6 +266,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = true
 		}
 	}
+	// leaderCommit
+	if args.LeaderCommit > rf.commitIndex {
+		var newCommitIndex int
+		if args.LeaderCommit > len(rf.log)-1 {
+			newCommitIndex = len(rf.log) - 1
+		} else {
+			newCommitIndex = args.LeaderCommit
+		}
+		for j := rf.commitIndex + 1; j <= newCommitIndex; j++ {
+			DPrintf("[FOLLOWER COMMIT] server %d commit log %d", rf.me, j)
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[j].Command,
+				CommandIndex: j,
+			}
+		}
+	}
 
 	rf.resetElectionTimeout_Enclosed()
 	rf.mu.Unlock()
@@ -327,10 +344,13 @@ func (rf *Raft) monitorLeaderStatus() {
 	}
 }
 func (rf *Raft) sendSingleHeartBeat(me int, idx int, oldTerm int) {
+	rf.mu.Lock()
 	args := &AppendEntriesArgs{
-		Term:     oldTerm,
-		LeaderId: me,
+		Term:         oldTerm,
+		LeaderId:     me,
+		LeaderCommit: rf.commitIndex,
 	}
+	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
 	//DPrintf("prepare to send heartbeat from server %d to server %d oldTerm %d", me, idx, oldTerm)
 	//requestTime := time.Now().UnixNano()
@@ -422,6 +442,7 @@ func (rf *Raft) syncLog(idx int) {
 	*/
 	lastLogIndex := len(rf.log) - 1
 	entries := rf.log[rf.nextIndex[idx]:]
+	nextIndex := rf.nextIndex[idx]
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -440,9 +461,40 @@ func (rf *Raft) syncLog(idx int) {
 
 	// assume logs are synced
 	if reply.Success {
-		rf.nextIndex[idx] = lastLogIndex
+		rf.mu.Lock()
+		DPrintf("[RPC REPLY] leader update nextIndex of %d to %d", idx, lastLogIndex+1)
+		rf.nextIndex[idx] = lastLogIndex + 1
+		rf.matchIndex[idx] = lastLogIndex
+		rf.mu.Unlock()
 		// increment commitIndex
 		// find top (n-1)/2, which is the commit index.
+		rf.mu.Lock()
+		// enumerate N
+		N := nextIndex
+		for N <= lastLogIndex {
+			// count how many matchIndex larger than N
+			acc := 0
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					if rf.matchIndex[i] >= N {
+						acc++
+					}
+				}
+			}
+			if acc+1 > len(rf.peers)/2 {
+				rf.commitIndex = N
+				DPrintf("[LEADER COMMIT] server %d commit log %d", rf.me, N)
+				rf.applyCh <- ApplyMsg{
+					Command:      rf.log[N].Command,
+					CommandValid: true,
+					CommandIndex: N,
+				}
+			} else {
+				break
+			}
+			N++
+		}
+		rf.mu.Unlock()
 	}
 
 }
