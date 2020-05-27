@@ -226,6 +226,8 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	Entries      []*Entry
 	LeaderCommit int
+	HeartBeat    bool // if it is heartbeat then true
+	Synced       bool // if already synced, then follower can commit.
 }
 
 type Entry struct {
@@ -237,6 +239,10 @@ type Entry struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	Xterm  int // term of conflicting entry
+	Xindex int // index of first entry of Xterm
+	Xlen   int // length of log
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -250,24 +256,43 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.updateTerm(args.Term)
 		rf.leaderId = args.LeaderId
 	}
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
+	}
 	// 2B
-	if args.Entries != nil {
+	if !args.HeartBeat {
+
 		// local log too few, refuse, need a smaller prevLogIndex
 		if args.PrevLogIndex >= len(rf.log) {
 			DPrintf("[WARNING] too few local log ")
+			reply.Xterm = -1
+			reply.Xlen = len(rf.log)
 		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			DPrintf("[WARNING] PrevLogTerm doesn't match")
 			// delete existing entry and all that follow it
+			reply.Xterm = rf.log[args.PrevLogIndex].Term
+			i := args.PrevLogIndex
+			for i >= 0 && rf.log[i].Term == reply.Xterm {
+				i--
+			}
+			reply.Xindex = i + 1
 		} else {
 			// normal op, delete existing entry and all that follow it
-			DPrintf("[RECEIVE LOG] receive %d logs on server %d", len(args.Entries), rf.me)
-			rf.log = append(rf.log, args.Entries...)
+			if args.Entries != nil {
+				DPrintf("[RECEIVE LOG] receive %d logs on server %d", len(args.Entries), rf.me)
+				rf.log = append(rf.log, args.Entries...)
+			} else {
+				DPrintf("[SYNCING] cut log to index %d", args.PrevLogIndex)
+				rf.log = rf.log[:args.PrevLogIndex+1]
+			}
 			reply.Term = rf.currentTerm
 			reply.Success = true
 		}
 	}
 	// leaderCommit
-	if args.LeaderCommit > rf.commitIndex {
+	if args.Synced && args.LeaderCommit > rf.commitIndex {
 		var newCommitIndex int
 		if args.LeaderCommit > len(rf.log)-1 {
 			newCommitIndex = len(rf.log) - 1
@@ -337,6 +362,7 @@ func (rf *Raft) monitorLeaderStatus() {
 			for i := 0; i < n; i++ {
 				rf.nextIndex[i] = lastLogIndex + 1
 				rf.matchIndex[i] = 0
+				rf.logSyncedMap[i] = false
 			}
 			rf.followerLastResp = make([]int64, len(rf.peers))
 			// if become leader, will send out heartbeat
@@ -350,6 +376,8 @@ func (rf *Raft) sendSingleHeartBeat(me int, idx int, oldTerm int) {
 		Term:         oldTerm,
 		LeaderId:     me,
 		LeaderCommit: rf.commitIndex,
+		HeartBeat:    true,
+		Synced:       rf.logSyncedMap[idx],
 	}
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
@@ -429,6 +457,76 @@ func (rf *Raft) syncLog(idx int) {
 		rf.mu.Unlock()
 		return
 	}
+
+	// if not already synced
+	/*
+		if PrevLogIndex == 0, reply.success, then synced.
+	*/
+	if !rf.logSyncedMap[idx] {
+		nextIndex := rf.nextIndex[idx]
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[idx] - 1,
+			PrevLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
+			Entries:      nil,
+			//Entries:      []*Entry{rf.log[rf.nextIndex[idx]]},
+			LeaderCommit: rf.commitIndex,
+			HeartBeat:    false,
+			Synced:       false,
+		}
+		//DPrintf("[SYNCING] send %d logs from server %d to server %d", len(entries), rf.me, idx)
+		rf.mu.Unlock()
+		reply := &AppendEntriesReply{}
+
+		rf.sendAppendEntries(idx, args, reply)
+
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.mu.Unlock()
+			return
+		}
+		if !reply.Success {
+			// if conflicting, xterm!=-1
+			// 		if leader doesn't have xterm, go to follower's first entry of term
+			// 		else , go to leader's first entry of term.
+			// else, go to xlen+1
+			if reply.Xterm != -1 {
+				// check if leader has xterm
+				leaderHasXterm := false
+				i := nextIndex
+				for i >= 0 && rf.log[i].Term >= reply.Xterm {
+					if rf.log[i].Term == reply.Xterm {
+						leaderHasXterm = true
+						break
+					}
+					i--
+				}
+				if !leaderHasXterm {
+					DPrintf("[CONFLICT] leader doesn't have xterm, go to reply.xindex %d", reply.Xindex)
+					rf.nextIndex[idx] = reply.Xindex
+				} else {
+					leaderTerm := rf.log[nextIndex].Term
+					for rf.log[i].Term == leaderTerm {
+						i--
+					}
+					DPrintf("[CONFLICT] leader have xterm, go to leader's first entry %d", i+1)
+					rf.nextIndex[idx] = i + 1
+				}
+			} else {
+				DPrintf("[CONFLICT] no log, follower backoff to %d", reply.Xlen-1)
+				rf.nextIndex[idx] = reply.Xlen - 1
+			}
+
+			rf.mu.Unlock()
+			return
+		} else {
+			DPrintf("[SYNCING] syncing is completed from leader %d to follower %d", rf.me, idx)
+			rf.logSyncedMap[idx] = true
+		}
+		rf.mu.Unlock()
+		return
+	}
 	/*
 		init state, first log
 		nextIndex = 1
@@ -452,6 +550,7 @@ func (rf *Raft) syncLog(idx int) {
 		Entries:      entries,
 		//Entries:      []*Entry{rf.log[rf.nextIndex[idx]]},
 		LeaderCommit: rf.commitIndex,
+		Synced:       true,
 	}
 	DPrintf("[REPLICATE] send %d logs from server %d to server %d", len(entries), rf.me, idx)
 	rf.mu.Unlock()
@@ -472,7 +571,7 @@ func (rf *Raft) syncLog(idx int) {
 		rf.mu.Lock()
 		// enumerate N
 		N := nextIndex
-		if N < rf.commitIndex {
+		if N <= rf.commitIndex {
 			N = rf.commitIndex + 1
 		}
 		for N <= lastLogIndex {
@@ -645,39 +744,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) logReplicate(command interface{}) {
-	rf.mu.Lock()
-	commitIndex := rf.commitIndex
-
-	term := rf.currentTerm
-	me := rf.me
-	args := &AppendEntriesArgs{
-		Term:     term,
-		LeaderId: me,
-		//PrevLogTerm:,
-		//PrevLogIndex:,
-		Entries:      nil,
-		LeaderCommit: commitIndex,
-	}
-
-	rf.mu.Unlock()
-	reply := &AppendEntriesReply{}
-	n := len(rf.peers)
-	// todo if last log index >= nextIndex, send
-
-	for i := 0; i < n; i++ {
-		if i != me {
-			go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-				rf.sendAppendEntries(i, args, reply)
-				if reply.Success {
-
-				}
-			}(i, args, reply)
-		}
-	}
-	// if half returns ok, then commit
-	// commit will be done in heartbeat.
-}
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
@@ -769,7 +835,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	for i := 0; i < n; i++ {
 		// todo for testing purpose
 		// assume log are synced
-		rf.logSyncedMap[i] = true
+		rf.logSyncedMap[i] = false
 		//rf.nextIndex[i] = 1
 		//rf.matchIndex[i] = 0
 	}
