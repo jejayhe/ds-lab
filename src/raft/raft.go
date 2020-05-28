@@ -263,6 +263,8 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 	HeartBeat    bool // if it is heartbeat then true
 	Synced       bool // if already synced, then follower can commit.
+
+	EntryStartIndex int // indicate start index of entries sent
 }
 
 type Entry struct {
@@ -316,8 +318,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			// normal op, delete existing entry and all that follow it
 			if args.Entries != nil {
-				DPrintf("[RECEIVE LOG] receive %d logs on server %d", len(args.Entries), rf.me)
-				rf.log = append(rf.log, args.Entries...)
+				// append entries not already in the log
+				/*
+					entryStartIndex.... actualNextIndex... end
+					entries
+				*/
+				logs := make([]interface{}, 0)
+				realEntries := args.Entries[len(rf.log)-args.EntryStartIndex:]
+				for _, e := range args.Entries[len(rf.log)-args.EntryStartIndex:] {
+					logs = append(logs, e.Command)
+				}
+				DPrintf("[RECEIVE LOG] receive [%d %d] logs on server %d : %v", len(rf.log), len(rf.log)+len(logs)-1, rf.me, logs)
+				rf.log = append(rf.log, realEntries...)
 				rf.persist()
 			} else {
 				DPrintf("[SYNCING] cut log to index %d", args.PrevLogIndex)
@@ -337,7 +349,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			newCommitIndex = args.LeaderCommit
 		}
 		for j := rf.commitIndex + 1; j <= newCommitIndex; j++ {
-			DPrintf("[FOLLOWER COMMIT] server %d commit log %d", rf.me, j)
+			DPrintf("[FOLLOWER COMMIT] server %d commit log %d command %v", rf.me, j, rf.log[j].Command)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log[j].Command,
@@ -588,8 +600,9 @@ func (rf *Raft) syncLog(idx int) {
 		PrevLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
 		Entries:      entries,
 		//Entries:      []*Entry{rf.log[rf.nextIndex[idx]]},
-		LeaderCommit: rf.commitIndex,
-		Synced:       true,
+		LeaderCommit:    rf.commitIndex,
+		Synced:          true,
+		EntryStartIndex: rf.nextIndex[idx],
 	}
 	DPrintf("[REPLICATE] send %d logs from server %d to server %d", len(entries), rf.me, idx)
 	rf.mu.Unlock()
@@ -625,13 +638,17 @@ func (rf *Raft) syncLog(idx int) {
 				}
 			}
 			if acc+1 > len(rf.peers)/2 {
-				rf.commitIndex = N
-				DPrintf("[LEADER COMMIT] server %d commit log %d command %v", rf.me, N, rf.log[N].Command)
-				rf.applyCh <- ApplyMsg{
-					Command:      rf.log[N].Command,
-					CommandValid: true,
-					CommandIndex: N,
+				if rf.commitIndex < N {
+					rf.commitIndex = N
+					//DPrintf("[DEBUG] update commit index to %d", N)
+					DPrintf("[LEADER COMMIT] server %d commit log %d command %v", rf.me, N, rf.log[N].Command)
+					rf.applyCh <- ApplyMsg{
+						Command:      rf.log[N].Command,
+						CommandValid: true,
+						CommandIndex: N,
+					}
 				}
+
 			} else {
 				break
 			}
@@ -830,6 +847,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	DPrintf("[KILL] kill server")
 }
 
 func (rf *Raft) killed() bool {
