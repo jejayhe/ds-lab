@@ -394,6 +394,7 @@ func (rf *Raft) monitorLeaderStatus() {
 		select {
 		case <-rf.leaderChan:
 			// todo init nextIndex, matchIndex
+			rf.mu.Lock()
 			n := len(rf.peers)
 			lastLogIndex := len(rf.log) - 1
 			for i := 0; i < n; i++ {
@@ -402,6 +403,7 @@ func (rf *Raft) monitorLeaderStatus() {
 				rf.logSyncedMap[i] = false
 			}
 			rf.followerLastResp = make([]int64, len(rf.peers))
+			rf.mu.Unlock()
 			// if become leader, will send out heartbeat
 			rf.leaderHeartbeatJob()
 		}
@@ -527,7 +529,7 @@ func (rf *Raft) syncLog(idx int) {
 			// if conflicting, xterm!=-1
 			// 		if leader doesn't have xterm, go to follower's first entry of term
 			// 		else , go to leader's first entry of term.
-			// else, go to xlen+1
+			// else, go to xlen
 			if reply.Xterm != -1 {
 				// check if leader has xterm
 				leaderHasXterm := false
@@ -551,8 +553,8 @@ func (rf *Raft) syncLog(idx int) {
 					rf.nextIndex[idx] = i + 1
 				}
 			} else {
-				DPrintf("[CONFLICT] no log, follower backoff to %d", reply.Xlen-1)
-				rf.nextIndex[idx] = reply.Xlen - 1
+				DPrintf("[CONFLICT] no log, follower backoff to %d", reply.Xlen)
+				rf.nextIndex[idx] = reply.Xlen
 			}
 
 			rf.mu.Unlock()
@@ -606,9 +608,10 @@ func (rf *Raft) syncLog(idx int) {
 		// increment commitIndex
 		// find top (n-1)/2, which is the commit index.
 		rf.mu.Lock()
-		// enumerate N
+		// enumerate N from nextIndex to lastLogIndex
 		N := nextIndex
-		if N <= rf.commitIndex {
+		// todo
+		if N > rf.commitIndex {
 			N = rf.commitIndex + 1
 		}
 		for N <= lastLogIndex {
