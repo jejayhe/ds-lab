@@ -322,8 +322,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				/*
 					entryStartIndex.... actualNextIndex... end
 					entries
+					log len 11, last index 10,
+					if entryStartIndex = 5
+					if entryStartIndex = 11
+					entries = [1,2]
+					startEntry = 8
 				*/
 				logs := make([]interface{}, 0)
+				// fixing bug I don't quite understand
+				if len(rf.log)-args.EntryStartIndex > len(args.Entries)-1 {
+					goto Label
+				}
 				realEntries := args.Entries[len(rf.log)-args.EntryStartIndex:]
 				for _, e := range args.Entries[len(rf.log)-args.EntryStartIndex:] {
 					logs = append(logs, e.Command)
@@ -336,6 +345,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.log = rf.log[:args.PrevLogIndex+1]
 				rf.persist()
 			}
+		Label:
 			reply.Term = rf.currentTerm
 			reply.Success = true
 		}
@@ -494,7 +504,7 @@ func (rf *Raft) replicateLogTo(idx int) {
 		}
 		rf.mu.Unlock()
 		rf.syncLog(idx)
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 func (rf *Raft) syncLog(idx int) {
@@ -546,6 +556,10 @@ func (rf *Raft) syncLog(idx int) {
 				// check if leader has xterm
 				leaderHasXterm := false
 				i := nextIndex
+				// bug that I don't understand
+				if i >= len(rf.log) {
+					goto EXIT1
+				}
 				for i >= 0 && rf.log[i].Term >= reply.Xterm {
 					if rf.log[i].Term == reply.Xterm {
 						leaderHasXterm = true
@@ -568,7 +582,7 @@ func (rf *Raft) syncLog(idx int) {
 				DPrintf("[CONFLICT] no log, follower backoff to %d", reply.Xlen)
 				rf.nextIndex[idx] = reply.Xlen
 			}
-
+		EXIT1:
 			rf.mu.Unlock()
 			return
 		} else {
