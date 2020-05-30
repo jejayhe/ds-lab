@@ -44,6 +44,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	IsLeader     bool // only leader needs to communicate to rpc handler
 }
 
 //
@@ -85,6 +86,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// lab3
+	ClientSequence map[string]int64 // client unique identifier: sequence number. need to persist
 }
 
 type StateType int
@@ -99,6 +102,24 @@ var stateNameMap = map[StateType]string{
 	State_Follower:  "follower",
 	State_Candidate: "candidate",
 	State_Leader:    "leader",
+}
+
+////if leaderId is valid, return leaderId, nil
+////else return -1, error
+// if rf is the leader, return 0, ok
+// if rf is not the leader, return a server to ask for
+func (rf *Raft) GetLeader() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.leaderId >= 0 && rf.leaderId < len(rf.peers) {
+		if rf.leaderId == rf.me {
+			return 0, true
+		} else {
+			return rf.leaderId, false
+		}
+	} else {
+		return rand.Intn(1e4) % len(rf.peers), false
+	}
 }
 
 // return currentTerm and whether this server
@@ -293,11 +314,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.updateTerm(args.Term)
 		rf.leaderId = args.LeaderId
 	}
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		rf.mu.Unlock()
 		return
 	}
+
+	// lab3
+	if rf.state == State_Follower {
+		//if args.LeaderId==-1{
+		//	DPrintf("[ERROR] AE rpc handler leaderId is -1")
+		//}
+		rf.leaderId = args.LeaderId
+	}
+
 	// 2B
 	if !args.HeartBeat {
 
@@ -660,6 +691,7 @@ func (rf *Raft) syncLog(idx int) {
 						Command:      rf.log[N].Command,
 						CommandValid: true,
 						CommandIndex: N,
+						IsLeader:     true,
 					}
 				}
 

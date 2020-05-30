@@ -19,7 +19,8 @@ type PutAppendArgs struct {
 }
 
 type PutAppendReply struct {
-	Err Err
+	Err          Err
+	NextServerId int // if NextServerId != -1, means need to query another server
 }
 
 type GetArgs struct {
@@ -28,6 +29,31 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	Err   Err
-	Value string
+	Err          Err
+	Value        string
+	NextServerId int
+}
+
+type OpType int
+
+const (
+	OpType_Get OpType = iota
+	OpType_Put
+	OpType_Append
+)
+
+var OpTypeDict = map[string]OpType{
+	"Get":    OpType_Get,
+	"Put":    OpType_Put,
+	"Append": OpType_Append,
+}
+
+//type Cmd struct {
+//	K  string
+//	V  string
+//	Op OpType
+//}
+type ReturnVal struct {
+	V  string
+	Ok bool
 }

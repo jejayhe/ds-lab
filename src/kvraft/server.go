@@ -1,12 +1,12 @@
 package kvraft
 
 import (
-	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
+	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
@@ -18,12 +18,23 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
-type Op struct {
+type Cmd struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	//Key string
+	//Value string
+	//Operation OpType
+	K          string
+	V          string
+	Op         OpType
+	ReturnChan chan ReturnVal // lab3 communicate with rpc handler
 }
+
+//func (op *Op) Get() {
+//
+//}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -35,16 +46,86 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	dict map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	nextServerId, ok := kv.rf.GetLeader()
+	if !ok {
+		reply.NextServerId = nextServerId
+		return
+	}
+	reply.NextServerId = -1
+
+	returnChan := make(chan ReturnVal)
+	cmd := Cmd{
+		K:          args.Key,
+		Op:         OpType_Get,
+		ReturnChan: returnChan,
+	}
+	kv.rf.Start(cmd)
+	select {
+	case rv := <-cmd.ReturnChan:
+		if rv.Ok {
+			reply.Value = rv.V
+			return
+		} else {
+			reply.Err = "KVServer.Get rv error"
+			return
+		}
+	case <-time.After(5 * time.Second):
+		reply.Err = "KVServer.Get timeout"
+		return
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	nextServerId, ok := kv.rf.GetLeader()
+	if !ok {
+		reply.NextServerId = nextServerId
+		return
+	}
+	reply.NextServerId = -1
+	returnChan := make(chan ReturnVal)
+	cmd := Cmd{
+		K:          args.Key,
+		V:          args.Value,
+		Op:         OpTypeDict[args.Op],
+		ReturnChan: returnChan,
+	}
+	kv.rf.Start(cmd)
+	select {
+	case rv := <-cmd.ReturnChan:
+		if rv.Ok {
+			return
+		} else {
+			reply.Err = "KVServer.PutAppend rc error"
+			return
+		}
+	case <-time.After(5 * time.Second):
+		reply.Err = "KVServer.PutAppend timeout"
+		return
+	}
 }
+
+/*
+	if rf is the leader, return 0, ok
+	if rf is not the leader, return a server to ask for
+*/
+//func (kv *KVServer) isLeader() (int, bool) {
+//	leaderId, err := kv.rf.GetLeader()
+//	if err == nil {
+//		if leaderId == kv.me {
+//			return 0, true
+//		} else {
+//			return leaderId, true
+//		}
+//	} else {
+//		return rand.Intn(1e4) %
+//	}
+//}
 
 //
 // the tester calls Kill() when a KVServer instance won't
@@ -67,6 +148,46 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+func (kv *KVServer) apply() {
+	for m := range kv.applyCh {
+		cmd := (m.Command).(Cmd)
+		kv.mu.Lock()
+		switch cmd.Op {
+		case OpType_Get:
+			v, _ := kv.dict[cmd.K]
+			if m.IsLeader {
+				select {
+				case cmd.ReturnChan <- ReturnVal{V: v, Ok: true}:
+				default:
+				}
+			}
+
+		case OpType_Put:
+			kv.dict[cmd.K] = cmd.V
+			if m.IsLeader {
+				select {
+				case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
+				default:
+				}
+			}
+		case OpType_Append:
+			oldv, ok := kv.dict[cmd.K]
+			if ok {
+				kv.dict[cmd.K] = oldv + cmd.V
+			} else {
+				kv.dict[cmd.K] = cmd.V
+			}
+			if m.IsLeader {
+				select {
+				case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
+				default:
+				}
+			}
+		}
+		kv.mu.Unlock()
+	}
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -84,7 +205,8 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	// todo uncomment
+	//labgob.Register(Op{})
 
 	kv := new(KVServer)
 	kv.me = me
