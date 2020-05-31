@@ -3,6 +3,7 @@ package kvraft
 import (
 	"../labrpc"
 	"sync"
+	"time"
 )
 import "crypto/rand"
 import "math/big"
@@ -55,13 +56,16 @@ func (ck *Clerk) Get(key string) string {
 		}
 		reply := &GetReply{}
 		ck.servers[serveri].Call("KVServer.Get", args, reply)
-		if reply.NextServerId != -1 {
+		if !reply.IsLeader {
 			// try another server
 			ck.mu.Lock()
-			ck.i = reply.NextServerId
+			ck.i = int(nrand()) % len(ck.servers)
+			serveri = ck.i
 			ck.mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
 			continue
 		} else {
+			DPrintf("[CLERK] Get [K:%s] returns [%s]", key, reply.Value)
 			return reply.Value
 			//break
 		}
@@ -91,15 +95,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			Op:    op,
 		}
 		reply := &PutAppendReply{}
+		DPrintf("[CLERK] calling KVServer %d.PutAppend [K=%s] [V=%s] [Op=%s] ", serveri, key, value, op)
 		ck.servers[serveri].Call("KVServer.PutAppend", args, reply)
-		if reply.NextServerId != -1 {
+		if !reply.IsLeader {
+			DPrintf("[CLERK]  KVServer.PutAppend sent to nonleader")
 			// try another server
 			ck.mu.Lock()
-			ck.i = reply.NextServerId
+			ck.i = int(nrand()) % len(ck.servers)
+			serveri = ck.i
 			ck.mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
 			continue
 		} else {
-
+			DPrintf("[CLERK]  KVServer.PutAppend return")
 			break
 		}
 	}

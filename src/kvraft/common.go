@@ -19,8 +19,8 @@ type PutAppendArgs struct {
 }
 
 type PutAppendReply struct {
-	Err          Err
-	NextServerId int // if NextServerId != -1, means need to query another server
+	Err      Err
+	IsLeader bool // if false means need to query another server
 }
 
 type GetArgs struct {
@@ -29,9 +29,9 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	Err          Err
-	Value        string
-	NextServerId int
+	Err      Err
+	Value    string
+	IsLeader bool
 }
 
 type OpType int

@@ -108,18 +108,23 @@ var stateNameMap = map[StateType]string{
 ////else return -1, error
 // if rf is the leader, return 0, ok
 // if rf is not the leader, return a server to ask for
-func (rf *Raft) GetLeader() (int, bool) {
+func (rf *Raft) IsLeader() bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.leaderId >= 0 && rf.leaderId < len(rf.peers) {
-		if rf.leaderId == rf.me {
-			return 0, true
-		} else {
-			return rf.leaderId, false
-		}
-	} else {
-		return rand.Intn(1e4) % len(rf.peers), false
+	if rf.leaderId == rf.me {
+		return true
 	}
+	return false
+	//DPrintf("[GetLeader] rf.leaderId=%d rf.me=%d", rf.leaderId, rf.me)
+	//if rf.leaderId >= 0 && rf.leaderId < len(rf.peers) {
+	//	if rf.leaderId == rf.me {
+	//		return 0, true
+	//	} else {
+	//		return rf.leaderId, false
+	//	}
+	//} else {
+	//	return rand.Intn(1e4) % len(rf.peers), false
+	//}
 }
 
 // return currentTerm and whether this server
@@ -473,9 +478,6 @@ func (rf *Raft) sendSingleHeartBeat(me int, idx int, oldTerm int) {
 	}
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
-	//DPrintf("prepare to send heartbeat from server %d to server %d oldTerm %d", me, idx, oldTerm)
-	//requestTime := time.Now().UnixNano()
-	//ok := rf.sendAppendEntries(idx, args, reply)
 
 	rf.sendAppendEntries(idx, args, reply)
 	//DPrintf("after send heartbeat from server %d to server %d oldTerm %d result %v", me, idx, oldTerm, ok)
@@ -865,7 +867,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		// todo go send AE rpc to others.
 		//rf.logIndex++
-		DPrintf("[START CMD] %v", command)
+		DPrintf("[START CMD] %+v", command)
 		rf.log = append(rf.log, &Entry{
 			//Index: rf.logIndex,
 			Command: command,

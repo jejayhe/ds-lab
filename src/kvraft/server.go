@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"../labgob"
 	"../labrpc"
 	"../raft"
 	"log"
@@ -9,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -51,12 +52,12 @@ type KVServer struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	nextServerId, ok := kv.rf.GetLeader()
+	ok := kv.rf.IsLeader()
 	if !ok {
-		reply.NextServerId = nextServerId
+		reply.IsLeader = false
 		return
 	}
-	reply.NextServerId = -1
+	reply.IsLeader = true
 
 	returnChan := make(chan ReturnVal)
 	cmd := Cmd{
@@ -82,12 +83,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	nextServerId, ok := kv.rf.GetLeader()
+	ok := kv.rf.IsLeader()
 	if !ok {
-		reply.NextServerId = nextServerId
+		reply.IsLeader = false
 		return
 	}
-	reply.NextServerId = -1
+	reply.IsLeader = true
 	returnChan := make(chan ReturnVal)
 	cmd := Cmd{
 		K:          args.Key,
@@ -95,17 +96,21 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Op:         OpTypeDict[args.Op],
 		ReturnChan: returnChan,
 	}
+	DPrintf("[KVSERVER] PutAppend [K=%s] [V=%s] [Op=%s] sent", args.Key, args.Value, args.Op)
 	kv.rf.Start(cmd)
+	DPrintf("[KVSERVER] PutAppend waiting...")
 	select {
 	case rv := <-cmd.ReturnChan:
 		if rv.Ok {
 			return
 		} else {
 			reply.Err = "KVServer.PutAppend rc error"
+			DPrintf("[KVSERVER] PutAppend get resp from ReturnChan")
 			return
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		reply.Err = "KVServer.PutAppend timeout"
+		DPrintf("[KVSERVER] PutAppend get resp timeout")
 		return
 	}
 }
@@ -206,18 +211,21 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	// todo uncomment
-	//labgob.Register(Op{})
+	labgob.Register(Cmd{})
 
 	kv := new(KVServer)
+	kv.mu.Lock()
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.dict = make(map[string]string)
+	kv.mu.Unlock()
+
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
 	// You may need initialization code here.
-
+	go kv.apply()
 	return kv
 }
