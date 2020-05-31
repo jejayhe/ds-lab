@@ -91,7 +91,7 @@ func (ck *Clerk) Get(key string) string {
 			ck.i = int(nrand()) % len(ck.servers)
 			serveri = ck.i
 			ck.mu.Unlock()
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(30 * time.Millisecond)
 			continue
 		} else {
 			DPrintf("[CLERK] Get [K:%s] returns [%s]", key, reply.Value)
@@ -141,7 +141,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			ck.i = int(nrand()) % len(ck.servers)
 			serveri = ck.i
 			ck.mu.Unlock()
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(30 * time.Millisecond)
 			continue
 		} else {
 			DPrintf("[CLERK]  KVServer.PutAppend return")

@@ -80,7 +80,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = "KVServer.Get rv error"
 			return
 		}
-	case <-time.After(1 * time.Second):
+	case <-time.After(300 * time.Millisecond):
 		reply.Err = "KVServer.Get timeout"
 		return
 	}
