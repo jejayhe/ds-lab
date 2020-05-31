@@ -80,7 +80,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = "KVServer.Get rv error"
 			return
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(1 * time.Second):
 		reply.Err = "KVServer.Get timeout"
 		return
 	}
@@ -115,7 +115,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			DPrintf("[KVSERVER] PutAppend get resp from ReturnChan")
 			return
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(1 * time.Second):
 		reply.Err = "KVServer.PutAppend timeout"
 		DPrintf("[KVSERVER] PutAppend get resp timeout")
 		return

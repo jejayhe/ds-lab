@@ -131,7 +131,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		reply := &PutAppendReply{}
 		DPrintf("[CLERK] calling KVServer %d.PutAppend [K=%s] [V=%s] [Op=%s] ", serveri, key, value, op)
 		ok := ck.servers[serveri].Call("KVServer.PutAppend", args, reply)
-		if !reply.IsLeader || !ok {
+		if !reply.IsLeader || !ok || reply.Err != "" {
+			if reply.Err != "" {
+				DPrintf("[DEBUG] Clerk.PutAppend err:[%s]", reply.Err)
+			}
 			DPrintf("[CLERK]  KVServer.PutAppend sent to nonleader")
 			// try another server
 			ck.mu.Lock()
