@@ -11,8 +11,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	i  int // server chosen
-	mu sync.Mutex
+	i        int // server chosen
+	mu       sync.Mutex
+	name     string // client name
+	sequence int64
 }
 
 func nrand() int64 {
@@ -26,10 +28,23 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.mu.Lock()
-	ck.i = int(nrand()) % len(servers)
 
-	ck.mu.Unlock()
+	//ck.mu.Lock()
+	ck.i = int(nrand()) % len(servers)
+	ck.name = "____CLIENT____" + randstring(20)
+	//name := ck.name
+	ck.sequence = 0
+	//ck.mu.Unlock()
+
+	//val := ck.Get(name)
+	//
+	////ck.mu.Lock()
+	//if val == "" {
+	//	ck.sequence = 0
+	//} else {
+	//	ck.sequence, _ = strconv.ParseInt(val, 10, 64)
+	//}
+	//ck.mu.Unlock()
 	return ck
 }
 
@@ -47,16 +62,30 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
+	//ck.mu.Lock()
+	//if ck.sequence == -1{
+	//
+	//}
+
 	ck.mu.Lock()
+	// todo
+	ck.sequence++
+	sequence := ck.sequence
+	clientName := ck.name
 	serveri := ck.i
 	ck.mu.Unlock()
 	for {
 		args := &GetArgs{
-			Key: key,
+			Key:        key,
+			ClientName: clientName,
+			Sequence:   sequence,
 		}
 		reply := &GetReply{}
-		ck.servers[serveri].Call("KVServer.Get", args, reply)
-		if !reply.IsLeader {
+		ok := ck.servers[serveri].Call("KVServer.Get", args, reply)
+		if !reply.IsLeader || !ok || reply.Err != "" {
+			if reply.Err != "" {
+				DPrintf("[DEBUG] Clerk.Get err:[%s]", reply.Err)
+			}
 			// try another server
 			ck.mu.Lock()
 			ck.i = int(nrand()) % len(ck.servers)
@@ -87,17 +116,22 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	ck.mu.Lock()
 	serveri := ck.i
+	ck.sequence++
+	sequence := ck.sequence
+	clientName := ck.name
 	ck.mu.Unlock()
 	for {
 		args := &PutAppendArgs{
-			Key:   key,
-			Value: value,
-			Op:    op,
+			Key:        key,
+			Value:      value,
+			Op:         op,
+			ClientName: clientName,
+			Sequence:   sequence,
 		}
 		reply := &PutAppendReply{}
 		DPrintf("[CLERK] calling KVServer %d.PutAppend [K=%s] [V=%s] [Op=%s] ", serveri, key, value, op)
-		ck.servers[serveri].Call("KVServer.PutAppend", args, reply)
-		if !reply.IsLeader {
+		ok := ck.servers[serveri].Call("KVServer.PutAppend", args, reply)
+		if !reply.IsLeader || !ok {
 			DPrintf("[CLERK]  KVServer.PutAppend sent to nonleader")
 			// try another server
 			ck.mu.Lock()

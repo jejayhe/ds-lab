@@ -5,6 +5,7 @@ import (
 	"../labrpc"
 	"../raft"
 	"log"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,8 @@ type Cmd struct {
 	V          string
 	Op         OpType
 	ReturnChan chan ReturnVal // lab3 communicate with rpc handler
+	ClientName string
+	Sequence   int64
 }
 
 //func (op *Op) Get() {
@@ -64,6 +67,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		K:          args.Key,
 		Op:         OpType_Get,
 		ReturnChan: returnChan,
+		ClientName: args.ClientName,
+		Sequence:   args.Sequence,
 	}
 	kv.rf.Start(cmd)
 	select {
@@ -95,6 +100,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		V:          args.Value,
 		Op:         OpTypeDict[args.Op],
 		ReturnChan: returnChan,
+		ClientName: args.ClientName,
+		Sequence:   args.Sequence,
 	}
 	DPrintf("[KVSERVER] PutAppend [K=%s] [V=%s] [Op=%s] sent", args.Key, args.Value, args.Op)
 	kv.rf.Start(cmd)
@@ -156,6 +163,8 @@ func (kv *KVServer) killed() bool {
 func (kv *KVServer) apply() {
 	for m := range kv.applyCh {
 		cmd := (m.Command).(Cmd)
+		clientName := cmd.ClientName
+		sequence := cmd.Sequence
 		kv.mu.Lock()
 		switch cmd.Op {
 		case OpType_Get:
@@ -168,24 +177,64 @@ func (kv *KVServer) apply() {
 			}
 
 		case OpType_Put:
-			kv.dict[cmd.K] = cmd.V
-			if m.IsLeader {
-				select {
-				case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
-				default:
+			/*
+				if seq already exists, return ok, do no op.
+				else update seq.
+			*/
+			seqstr, ok := kv.dict[clientName]
+			var seq int64 = 0
+			if ok {
+				seq, _ = strconv.ParseInt(seqstr, 10, 64)
+			}
+			if sequence <= seq {
+				if m.IsLeader {
+					select {
+					case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
+					default:
+					}
+				}
+			} else {
+				kv.dict[clientName] = strconv.FormatInt(sequence, 10)
+				kv.dict[cmd.K] = cmd.V
+				if m.IsLeader {
+					select {
+					case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
+					default:
+					}
 				}
 			}
+
 		case OpType_Append:
-			oldv, ok := kv.dict[cmd.K]
+			/*
+				if seq already exists, return ok, do no op.
+				else update seq.
+			*/
+			seqstr, ok := kv.dict[clientName]
+			var seq int64 = 0
 			if ok {
-				kv.dict[cmd.K] = oldv + cmd.V
-			} else {
-				kv.dict[cmd.K] = cmd.V
+				seq, _ = strconv.ParseInt(seqstr, 10, 64)
 			}
-			if m.IsLeader {
-				select {
-				case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
-				default:
+			if sequence <= seq {
+				if m.IsLeader {
+					select {
+					case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
+					default:
+					}
+				}
+			} else {
+				kv.dict[clientName] = strconv.FormatInt(sequence, 10)
+
+				oldv, ok := kv.dict[cmd.K]
+				if ok {
+					kv.dict[cmd.K] = oldv + cmd.V
+				} else {
+					kv.dict[cmd.K] = cmd.V
+				}
+				if m.IsLeader {
+					select {
+					case cmd.ReturnChan <- ReturnVal{V: "", Ok: true}:
+					default:
+					}
 				}
 			}
 		}
