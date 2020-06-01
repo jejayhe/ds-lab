@@ -5,10 +5,11 @@ import (
 	"../labrpc"
 	"../raft"
 	"bytes"
-	"github.com/sasha-s/go-deadlock"
+	"sync"
+
+	//"github.com/sasha-s/go-deadlock"
 	"log"
 	"strconv"
-	//"sync"
 	"sync/atomic"
 	"time"
 )
@@ -43,8 +44,8 @@ type Cmd struct {
 //}
 
 type KVServer struct {
-	//mu      sync.Mutex
-	mu      deadlock.Mutex
+	mu sync.Mutex
+	//mu      deadlock.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -73,6 +74,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClientName: args.ClientName,
 		Sequence:   args.Sequence,
 	}
+	DPrintf("[KVSERVER %d] Get [K=%s] sent", kv.me, args.Key)
 	kv.rf.Start(cmd)
 	select {
 	case rv := <-cmd.ReturnChan:
@@ -119,7 +121,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			DPrintf("[KVSERVER] PutAppend get resp from ReturnChan")
 			return
 		}
-	case <-time.After(1 * time.Second):
+	case <-time.After(300 * time.Millisecond):
 		reply.Err = "KVServer.PutAppend timeout"
 		DPrintf("[KVSERVER] PutAppend get resp timeout")
 		return

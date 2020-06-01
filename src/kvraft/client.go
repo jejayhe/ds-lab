@@ -31,7 +31,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 
 	//ck.mu.Lock()
 	ck.i = int(nrand()) % len(servers)
-	ck.name = "____CLIENT____" + randstring(20)
+	ck.name = "CLI__" + randstring(3)
 	//name := ck.name
 	ck.sequence = 0
 	//ck.mu.Unlock()

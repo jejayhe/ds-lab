@@ -19,8 +19,10 @@ package raft
 
 import (
 	"bytes"
-	"github.com/sasha-s/go-deadlock"
+	//"github.com/sasha-s/go-deadlock"
 	"math/rand"
+	"sync"
+
 	//"sync"
 	"time"
 )
@@ -53,8 +55,8 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu deadlock.Mutex // Lock to protect shared access to this peer's state
-	//mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	//mu deadlock.Mutex // Lock to protect shared access to this peer's state
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -223,9 +225,9 @@ func (rf *Raft) TakeSnapshot(snapshot []byte, lastIncludedIndex, lastIncludedTer
 	DPrintf("[SNAPSHOT] raft server %d take snapshot ...", rf.me)
 	e1.Encode(rf.currentTerm)
 	e1.Encode(rf.votedFor)
-	lenLog := rf.lenLog()
+	oldlen := len(rf.log)
 	rf.log = rf.logFromTo(rf.lastApplied, -1)
-	DPrintf("[DEBUG] server %d rf.lastApplied = %d log trimmed from %d to %d rf.commitIndex = %d", rf.me, rf.lastApplied, lenLog, rf.lenLog(), rf.commitIndex)
+	DPrintf("[DEBUG] server %d rf.lastApplied = %d log trimmed from %d to %d rf.commitIndex = %d", rf.me, rf.lastApplied, oldlen, len(rf.log), rf.commitIndex)
 	e1.Encode(rf.log)
 	rf.logOffset = rf.lastApplied
 	e1.Encode(rf.logOffset)
