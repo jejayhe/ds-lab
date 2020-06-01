@@ -5,9 +5,10 @@ import (
 	"../labrpc"
 	"../raft"
 	"bytes"
+	"github.com/sasha-s/go-deadlock"
 	"log"
 	"strconv"
-	"sync"
+	//"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,7 +43,8 @@ type Cmd struct {
 //}
 
 type KVServer struct {
-	mu      sync.Mutex
+	//mu      sync.Mutex
+	mu      deadlock.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -88,6 +90,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	DPrintf("[KVSERVER %d] PutAppend [K=%s] [V=%s] [Op=%s] start serving", kv.me, args.Key, args.Value, args.Op)
 	// Your code here.
 	ok := kv.rf.IsLeader()
 	if !ok {
@@ -104,9 +107,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientName: args.ClientName,
 		Sequence:   args.Sequence,
 	}
-	DPrintf("[KVSERVER] PutAppend [K=%s] [V=%s] [Op=%s] sent", args.Key, args.Value, args.Op)
+	DPrintf("[KVSERVER %d] PutAppend [K=%s] [V=%s] [Op=%s] sent", kv.me, args.Key, args.Value, args.Op)
 	kv.rf.Start(cmd)
-	DPrintf("[KVSERVER] PutAppend waiting...")
+	DPrintf("[KVSERVER %d] PutAppend waiting...", kv.me)
 	select {
 	case rv := <-cmd.ReturnChan:
 		if rv.Ok {
@@ -163,6 +166,20 @@ func (kv *KVServer) killed() bool {
 
 func (kv *KVServer) apply() {
 	for m := range kv.applyCh {
+		if m.Snapshot != nil {
+			r := bytes.NewBuffer(m.Snapshot)
+			d := labgob.NewDecoder(r)
+			dict := make(map[string]string)
+			if d.Decode(&dict) != nil {
+				DPrintf("[ERROR] KVServer.apply m.Snapshot")
+			} else {
+				kv.mu.Lock()
+				kv.dict = dict
+				DPrintf("[SNAPSHOT] KVServer.apply server %d successfully apply", kv.me)
+				kv.mu.Unlock()
+			}
+			continue
+		}
 		cmd := (m.Command).(Cmd)
 		clientName := cmd.ClientName
 		sequence := cmd.Sequence
@@ -302,14 +319,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 func (kv *KVServer) restoreSnapShot() {
+	//kv.testRestoreSnapShot()
 	data := kv.rf.RestoreSnapshot()
 	if data == nil || len(data) < 1 {
 		return
 	}
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	dict := make(map[string]string, 0)
-	if d.Decode(dict) != nil {
+	dict := make(map[string]string)
+	if d.Decode(&dict) != nil {
 		DPrintf("[ERROR] KVServer.restoreSnapShot")
 	} else {
 		kv.mu.Lock()
@@ -317,3 +335,44 @@ func (kv *KVServer) restoreSnapShot() {
 		kv.mu.Unlock()
 	}
 }
+
+type Item struct {
+	K string
+	V string
+}
+
+//func (kv *KVServer) testRestoreSnapShot() {
+//	DPrintf("[TEST] KVServer.testRestoreSnapShot")
+//	w := new(bytes.Buffer)
+//	e := labgob.NewEncoder(w)
+//
+//	oldDict := []*Item{{K: "hello", V: "1"}, {K: "world", V: "2"}}
+//	e.Encode(oldDict)
+//	data := w.Bytes()
+//	r := bytes.NewBuffer(data)
+//	d := labgob.NewDecoder(r)
+//	dict := make([]*Item, 0)
+//	if d.Decode(&dict) != nil {
+//		DPrintf("[ERROR] KVServer.testRestoreSnapShot")
+//	} else {
+//		DPrintf("[ERROR] success! dict = %v", dict)
+//	}
+//}
+
+//func (kv *KVServer) testRestoreSnapShot() {
+//	DPrintf("[TEST] KVServer.testRestoreSnapShot")
+//	w := new(bytes.Buffer)
+//	e := labgob.NewEncoder(w)
+//
+//	oldDict := map[string]string{"hello": "world"}
+//	e.Encode(oldDict)
+//	data := w.Bytes()
+//	r := bytes.NewBuffer(data)
+//	d := labgob.NewDecoder(r)
+//	dict := make(map[string]string)
+//	if d.Decode(&dict) != nil {
+//		DPrintf("[ERROR] KVServer.testRestoreSnapShot")
+//	} else {
+//		DPrintf("[ERROR] success! dict = %v", dict)
+//	}
+//}
