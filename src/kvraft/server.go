@@ -266,7 +266,7 @@ func (kv *KVServer) apply() {
 		//kv.mu.Unlock()
 		// check log too large??
 		if kv.rf.TimeForSnapshot(kv.maxraftstate) {
-			DPrintf("[SNAPSHOT] take snapshot ...")
+			DPrintf("[SNAPSHOT] kvserver take snapshot ...")
 			// take snapshot
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)

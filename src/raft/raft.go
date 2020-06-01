@@ -145,7 +145,7 @@ func (rf *Raft) lenLog() int {
 }
 func (rf *Raft) logAt(idx int) *Entry {
 	if idx-rf.logOffset < 0 || idx-rf.logOffset >= len(rf.log) {
-		DPrintf("[FATAL ERROR] raft.logAt idx=%d logOffset=%d", idx, rf.logOffset)
+		DPrintf("[FATAL ERROR] server %d raft.logAt idx=%d logOffset=%d lenLog= %d", rf.me, idx, rf.logOffset, rf.lenLog())
 		return nil
 	} else {
 		return rf.log[idx-rf.logOffset]
@@ -220,10 +220,12 @@ func (rf *Raft) TakeSnapshot(snapshot []byte, lastIncludedIndex, lastIncludedTer
 
 	// todo lock/unlock ??
 	rf.mu.Lock()
+	DPrintf("[SNAPSHOT] raft server %d take snapshot ...", rf.me)
 	e1.Encode(rf.currentTerm)
 	e1.Encode(rf.votedFor)
-	DPrintf("[DEBUG] rf.lastApplied = %d", rf.lastApplied)
+	lenLog := rf.lenLog()
 	rf.log = rf.logFromTo(rf.lastApplied, -1)
+	DPrintf("[DEBUG] server %d rf.lastApplied = %d log trimmed from %d to %d rf.commitIndex = %d", rf.me, rf.lastApplied, lenLog, rf.lenLog(), rf.commitIndex)
 	e1.Encode(rf.log)
 	rf.logOffset = rf.lastApplied
 	e1.Encode(rf.logOffset)
@@ -501,8 +503,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			newCommitIndex = args.LeaderCommit
 		}
 		for j := rf.commitIndex + 1; j <= newCommitIndex; j++ {
+			DPrintf("[FOLLOWER COMMIT] server %d args.LeaderCommit = %d rf.commitIndex = %d lenLog = %d", rf.me, args.LeaderCommit,
+				rf.commitIndex, rf.lenLog())
+			if j < rf.logOffset {
+				break
+			}
 			DPrintf("[FOLLOWER COMMIT] server %d commit log %d command %v", rf.me, j, rf.logAt(j).Command)
-
+			if j > rf.commitIndex {
+				//DPrintf("[FOLLOWER COMMIT] server %d update rf.commitIndex from %d to %d", rf.commitIndex, newCommitIndex)
+				rf.commitIndex = j
+			}
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logAt(j).Command,
@@ -512,7 +522,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.applyCh <- applyMsg
 			rf.mu.Lock()
 		}
-		rf.commitIndex = newCommitIndex
+
 	}
 
 	rf.resetElectionTimeout_Enclosed()
@@ -704,7 +714,7 @@ func (rf *Raft) syncLog(idx int) {
 	*/
 	if !rf.logSyncedMap[idx] {
 		// todo debug
-		if rf.nextIndex[idx] < rf.logOffset {
+		if rf.nextIndex[idx] < rf.logOffset+1 {
 			rf.nextIndex[idx] = rf.lenLog()
 		}
 		nextIndex := rf.nextIndex[idx]
