@@ -4,6 +4,7 @@ import (
 	"../labgob"
 	"../labrpc"
 	"../raft"
+	"bytes"
 	"log"
 	"strconv"
 	"sync"
@@ -11,7 +12,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -239,8 +240,25 @@ func (kv *KVServer) apply() {
 			}
 		}
 		kv.mu.Unlock()
+		kv.rf.UpdateLastApplied(m.CommandIndex)
 		if kv.killed() {
 			break
+		}
+		//kv.mu.Lock()
+		//maxraftstate:= kv.maxraftstate
+		//kv.mu.Unlock()
+		// check log too large??
+		if kv.rf.TimeForSnapshot(kv.maxraftstate) {
+			DPrintf("[SNAPSHOT] take snapshot ...")
+			// take snapshot
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+
+			kv.mu.Lock()
+			e.Encode(kv.dict)
+			kv.mu.Unlock()
+			data := w.Bytes()
+			kv.rf.TakeSnapshot(data, -1, -1)
 		}
 	}
 }
@@ -277,7 +295,25 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.mu.Unlock()
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.restoreSnapShot()
 	// You may need initialization code here.
 	go kv.apply()
 	return kv
+}
+
+func (kv *KVServer) restoreSnapShot() {
+	data := kv.rf.RestoreSnapshot()
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	dict := make(map[string]string, 0)
+	if d.Decode(dict) != nil {
+		DPrintf("[ERROR] KVServer.restoreSnapShot")
+	} else {
+		kv.mu.Lock()
+		kv.dict = dict
+		kv.mu.Unlock()
+	}
 }

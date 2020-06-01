@@ -88,6 +88,8 @@ type Raft struct {
 
 	// lab3
 	ClientSequence map[string]int64 // client unique identifier: sequence number. need to persist
+
+	logOffset int
 }
 
 type StateType int
@@ -102,6 +104,14 @@ var stateNameMap = map[StateType]string{
 	State_Follower:  "follower",
 	State_Candidate: "candidate",
 	State_Leader:    "leader",
+}
+
+func (rf *Raft) UpdateLastApplied(cmdIndex int) {
+	rf.mu.Lock()
+	if cmdIndex > rf.lastApplied {
+		rf.lastApplied = cmdIndex
+	}
+	rf.mu.Unlock()
 }
 
 ////if leaderId is valid, return leaderId, nil
@@ -125,6 +135,40 @@ func (rf *Raft) IsLeader() bool {
 	//} else {
 	//	return rand.Intn(1e4) % len(rf.peers), false
 	//}
+}
+
+func (rf *Raft) lenLog() int {
+	return len(rf.log) + rf.logOffset
+}
+func (rf *Raft) logAt(idx int) *Entry {
+	if idx-rf.logOffset < 0 || idx-rf.logOffset >= len(rf.log) {
+		DPrintf("[FATAL ERROR] raft.logAt")
+		return nil
+	} else {
+		return rf.log[idx-rf.logOffset]
+	}
+}
+
+func (rf *Raft) logFromTo(from, to int) []*Entry {
+	if from == -1 && to == -1 {
+		return rf.log
+	} else if from == -1 {
+		if to-rf.logOffset > len(rf.log) || to-rf.logOffset <= 0 {
+			DPrintf("[FATAL ERROR] raft.logFromTo 1")
+		}
+		return rf.log[:to-rf.logOffset]
+	} else if to == -1 {
+		if from-rf.logOffset >= len(rf.log) || from-rf.logOffset < 0 {
+			DPrintf("[FATAL ERROR] raft.logFromTo 2")
+		}
+		return rf.log[from-rf.logOffset:]
+	} else {
+		if to-rf.logOffset > len(rf.log) || to-rf.logOffset <= 0 ||
+			from-rf.logOffset >= len(rf.log) || from-rf.logOffset < 0 {
+			DPrintf("[FATAL ERROR] raft.logFromTo 3")
+		}
+		return rf.log[from-rf.logOffset : to-rf.logOffset]
+	}
 }
 
 // return currentTerm and whether this server
@@ -157,6 +201,57 @@ func (rf *Raft) GetState() (int, bool) {
 
 	return term, isleader
 }
+func (rf *Raft) TimeForSnapshot(threshold int) bool {
+	if threshold <= 0 {
+		return false
+	}
+	if rf.persister.RaftStateSize() > threshold*90/100 {
+		return true
+	}
+	return false
+}
+
+func (rf *Raft) TakeSnapshot(snapshot []byte, lastIncludedIndex, lastIncludedTerm int) {
+	w1 := new(bytes.Buffer)
+	e1 := labgob.NewEncoder(w1)
+
+	// todo lock/unlock ??
+	rf.mu.Lock()
+	e1.Encode(rf.currentTerm)
+	e1.Encode(rf.votedFor)
+	DPrintf("[DEBUG] rf.lastApplied = %d", rf.lastApplied)
+	rf.log = rf.logFromTo(rf.lastApplied, -1)
+	e1.Encode(rf.log)
+	rf.logOffset = rf.lastApplied
+	e1.Encode(rf.logOffset)
+	rf.mu.Unlock()
+
+	data1 := w1.Bytes()
+	// todo trim log
+	//
+	rf.persister.SaveStateAndSnapshot(data1, snapshot)
+}
+
+func (rf *Raft) RestoreSnapshot() []byte {
+	data := rf.persister.ReadSnapshot()
+	return data
+	//r := bytes.NewBuffer(data)
+	//d := labgob.NewDecoder(r)
+	//var currentTerm int
+	//var votedFor int
+	//var log []*Entry
+	//if d.Decode(&currentTerm) != nil ||
+	//	d.Decode(&votedFor) != nil ||
+	//	d.Decode(&log) != nil {
+	//	DPrintf("[ERROR] readPersist")
+	//} else {
+	//	rf.mu.Lock()
+	//	rf.currentTerm = currentTerm
+	//	rf.votedFor = votedFor
+	//	rf.log = log
+	//	rf.mu.Unlock()
+	//}
+}
 
 //
 // save Raft's persistent state to stable storage,
@@ -180,6 +275,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.logOffset)
 	//rf.mu.Unlock()
 
 	data := w.Bytes()
@@ -211,15 +307,18 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []*Entry
+	var logOffset int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&logOffset) != nil {
 		DPrintf("[ERROR] readPersist")
 	} else {
 		rf.mu.Lock()
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.logOffset = logOffset
 		rf.mu.Unlock()
 	}
 }
@@ -266,8 +365,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// todo valid request should result in timeout clearance
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		//2B compare log
-		myLastLogIndex := len(rf.log) - 1
-		myLastLogTerm := rf.log[myLastLogIndex].Term
+		myLastLogIndex := rf.lenLog() - 1
+		myLastLogTerm := rf.logAt(myLastLogIndex).Term
 		if args.LastLogTerm > myLastLogTerm || (args.LastLogTerm == myLastLogTerm && args.LastLogIndex >= myLastLogIndex) {
 			rf.resetElectionTimeout_Enclosed()
 			// todo: need to check log
@@ -338,16 +437,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if !args.HeartBeat {
 
 		// local log too few, refuse, need a smaller prevLogIndex
-		if args.PrevLogIndex >= len(rf.log) {
+		if args.PrevLogIndex >= rf.lenLog() {
 			DPrintf("[WARNING] too few local log ")
 			reply.Xterm = -1
-			reply.Xlen = len(rf.log)
-		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Xlen = rf.lenLog()
+
+			//else if args.PrevLogIndex-rf.logOffset < 0 {
+			//	DPrintf("[FATAL] Raft.AppendEntries error 1")
+		} else if rf.logAt(args.PrevLogIndex).Term != args.PrevLogTerm {
 			DPrintf("[WARNING] PrevLogTerm doesn't match")
 			// delete existing entry and all that follow it
-			reply.Xterm = rf.log[args.PrevLogIndex].Term
+			reply.Xterm = rf.logAt(args.PrevLogIndex).Term
 			i := args.PrevLogIndex
-			for i >= 0 && rf.log[i].Term == reply.Xterm {
+			for i >= 0 && rf.logAt(i).Term == reply.Xterm {
 				i--
 			}
 			reply.Xindex = i + 1
@@ -366,19 +468,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				*/
 				logs := make([]interface{}, 0)
 				// fixing bug I don't quite understand
-				if len(rf.log)-args.EntryStartIndex > len(args.Entries)-1 {
+				if rf.lenLog()-args.EntryStartIndex > len(args.Entries)-1 {
 					goto Label
 				}
-				realEntries := args.Entries[len(rf.log)-args.EntryStartIndex:]
-				for _, e := range args.Entries[len(rf.log)-args.EntryStartIndex:] {
+				realEntries := args.Entries[rf.lenLog()-args.EntryStartIndex:]
+				for _, e := range args.Entries[rf.lenLog()-args.EntryStartIndex:] {
 					logs = append(logs, e.Command)
 				}
-				DPrintf("[RECEIVE LOG] receive [%d %d] logs on server %d : %v", len(rf.log), len(rf.log)+len(logs)-1, rf.me, logs)
+				DPrintf("[RECEIVE LOG] receive [%d %d] logs on server %d : %v", rf.lenLog(), rf.lenLog()+len(logs)-1, rf.me, logs)
 				rf.log = append(rf.log, realEntries...)
 				rf.persist()
 			} else {
 				DPrintf("[SYNCING] cut log to index %d", args.PrevLogIndex)
-				rf.log = rf.log[:args.PrevLogIndex+1]
+				rf.log = rf.logFromTo(-1, args.PrevLogIndex+1)
 				rf.persist()
 			}
 		Label:
@@ -389,16 +491,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// leaderCommit
 	if args.Synced && args.LeaderCommit > rf.commitIndex {
 		var newCommitIndex int
-		if args.LeaderCommit > len(rf.log)-1 {
-			newCommitIndex = len(rf.log) - 1
+		if args.LeaderCommit > rf.lenLog()-1 {
+			newCommitIndex = rf.lenLog() - 1
 		} else {
 			newCommitIndex = args.LeaderCommit
 		}
 		for j := rf.commitIndex + 1; j <= newCommitIndex; j++ {
-			DPrintf("[FOLLOWER COMMIT] server %d commit log %d command %v", rf.me, j, rf.log[j].Command)
+			DPrintf("[FOLLOWER COMMIT] server %d commit log %d command %v", rf.me, j, rf.logAt(j).Command)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[j].Command,
+				Command:      rf.logAt(j).Command,
 				CommandIndex: j,
 			}
 		}
@@ -454,7 +556,7 @@ func (rf *Raft) monitorLeaderStatus() {
 			// todo init nextIndex, matchIndex
 			rf.mu.Lock()
 			n := len(rf.peers)
-			lastLogIndex := len(rf.log) - 1
+			lastLogIndex := rf.lenLog() - 1
 			for i := 0; i < n; i++ {
 				rf.nextIndex[i] = lastLogIndex + 1
 				rf.matchIndex[i] = 0
@@ -547,7 +649,7 @@ func (rf *Raft) syncLog(idx int) {
 	*/
 
 	// no new log
-	if len(rf.log)-1 < rf.nextIndex[idx] {
+	if rf.lenLog() <= rf.nextIndex[idx] {
 		rf.mu.Unlock()
 		return
 	}
@@ -562,7 +664,7 @@ func (rf *Raft) syncLog(idx int) {
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: rf.nextIndex[idx] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
+			PrevLogTerm:  rf.logAt(rf.nextIndex[idx] - 1).Term,
 			Entries:      nil,
 			//Entries:      []*Entry{rf.log[rf.nextIndex[idx]]},
 			LeaderCommit: rf.commitIndex,
@@ -590,11 +692,11 @@ func (rf *Raft) syncLog(idx int) {
 				leaderHasXterm := false
 				i := nextIndex
 				// bug that I don't understand
-				if i >= len(rf.log) {
+				if i >= rf.lenLog() {
 					goto EXIT1
 				}
-				for i >= 0 && rf.log[i].Term >= reply.Xterm {
-					if rf.log[i].Term == reply.Xterm {
+				for i >= 0 && rf.logAt(i).Term >= reply.Xterm {
+					if rf.logAt(i).Term == reply.Xterm {
 						leaderHasXterm = true
 						break
 					}
@@ -604,8 +706,8 @@ func (rf *Raft) syncLog(idx int) {
 					DPrintf("[CONFLICT] leader doesn't have xterm, go to reply.xindex %d", reply.Xindex)
 					rf.nextIndex[idx] = reply.Xindex
 				} else {
-					leaderTerm := rf.log[nextIndex].Term
-					for rf.log[i].Term == leaderTerm {
+					leaderTerm := rf.logAt(nextIndex).Term
+					for rf.logAt(i).Term == leaderTerm {
 						i--
 					}
 					DPrintf("[CONFLICT] leader have xterm, go to leader's first entry %d", i+1)
@@ -637,14 +739,14 @@ func (rf *Raft) syncLog(idx int) {
 		commitIndex = 0
 
 	*/
-	lastLogIndex := len(rf.log) - 1
-	entries := rf.log[rf.nextIndex[idx]:]
+	lastLogIndex := rf.lenLog() - 1
+	entries := rf.logFromTo(rf.nextIndex[idx], -1)
 	nextIndex := rf.nextIndex[idx]
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: rf.nextIndex[idx] - 1,
-		PrevLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
+		PrevLogTerm:  rf.logAt(rf.nextIndex[idx] - 1).Term,
 		Entries:      entries,
 		//Entries:      []*Entry{rf.log[rf.nextIndex[idx]]},
 		LeaderCommit:    rf.commitIndex,
@@ -688,9 +790,9 @@ func (rf *Raft) syncLog(idx int) {
 				if rf.commitIndex < N {
 					rf.commitIndex = N
 					//DPrintf("[DEBUG] update commit index to %d", N)
-					DPrintf("[LEADER COMMIT] server %d commit log %d command %v", rf.me, N, rf.log[N].Command)
+					DPrintf("[LEADER COMMIT] server %d commit log %d command %v", rf.me, N, rf.logAt(N).Command)
 					rf.applyCh <- ApplyMsg{
-						Command:      rf.log[N].Command,
+						Command:      rf.logAt(N).Command,
 						CommandValid: true,
 						CommandIndex: N,
 						IsLeader:     true,
@@ -739,9 +841,9 @@ func (rf *Raft) startCampaignForSelf() {
 
 	tmpTerm := rf.currentTerm
 	tmpCandidateId := rf.me
-	lenLog := len(rf.log)
+	lenLog := rf.lenLog()
 	tmpLastLogIndex := lenLog - 1
-	tmpLastLogTerm := rf.log[lenLog-1].Term
+	tmpLastLogTerm := rf.logAt(lenLog - 1).Term
 
 	n := len(rf.peers)
 	rf.mu.Unlock()
@@ -863,7 +965,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 	} else {
 		//commitIndex:=rf.commitIndex
-		index = len(rf.log)
+		index = rf.lenLog()
 		term = rf.currentTerm
 		// todo go send AE rpc to others.
 		//rf.logIndex++
