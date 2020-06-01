@@ -448,8 +448,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Xterm = -1
 			reply.Xlen = rf.lenLog()
 
-			//else if args.PrevLogIndex-rf.logOffset < 0 {
-			//	DPrintf("[FATAL] Raft.AppendEntries error 1")
+		} else if args.PrevLogIndex-rf.logOffset < 0 {
+			DPrintf("[FATAL] Raft.AppendEntries error 1")
+			reply.Xterm = rf.log[0].Term
+			reply.Xindex = rf.logOffset
 		} else if rf.logAt(args.PrevLogIndex).Term != args.PrevLogTerm {
 			DPrintf("[WARNING] PrevLogTerm doesn't match")
 			// delete existing entry and all that follow it
