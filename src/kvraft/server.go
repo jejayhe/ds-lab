@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -178,6 +178,7 @@ func (kv *KVServer) apply() {
 				kv.mu.Lock()
 				kv.dict = dict
 				DPrintf("[SNAPSHOT] KVServer.apply server %d successfully apply", kv.me)
+				DPrintf("[KVSERVER %d] data:[%v]", kv.me, kv.dict)
 				kv.mu.Unlock()
 			}
 			continue
@@ -258,6 +259,7 @@ func (kv *KVServer) apply() {
 				}
 			}
 		}
+		DPrintf("[KVSERVER %d] data:[%v]", kv.me, kv.dict)
 		kv.mu.Unlock()
 		kv.rf.UpdateLastApplied(m.CommandIndex)
 		if kv.killed() {

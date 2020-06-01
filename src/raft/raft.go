@@ -485,7 +485,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				for _, e := range args.Entries[rf.lenLog()-args.EntryStartIndex:] {
 					logs = append(logs, e.Command)
 				}
-				DPrintf("[RECEIVE LOG] receive [%d %d] logs on server %d : %v", rf.lenLog(), rf.lenLog()+len(logs)-1, rf.me, logs)
+				DPrintf("[RECEIVE LOG] receive [%d %d] logs on server %d : %+v", rf.lenLog(), rf.lenLog()+len(logs)-1, rf.me, logs)
 				rf.log = append(rf.log, realEntries...)
 				rf.persist()
 			} else {
@@ -570,6 +570,23 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.log = append(rf.log, &Entry{Term: args.LastIncludedTerm})
 	rf.logOffset = args.LastIncludedIndex
 	rf.commitIndex = args.LastIncludedIndex
+
+	w1 := new(bytes.Buffer)
+	e1 := labgob.NewEncoder(w1)
+	e1.Encode(rf.currentTerm)
+	e1.Encode(rf.votedFor)
+	//oldlen := len(rf.log)
+	//rf.log = rf.logFromTo(rf.lastApplied, -1)
+	//DPrintf("[DEBUG] server %d rf.lastApplied = %d log trimmed from %d to %d rf.commitIndex = %d", rf.me, rf.lastApplied, oldlen, len(rf.log), rf.commitIndex)
+	e1.Encode(rf.log)
+	//rf.logOffset = rf.lastApplied
+	e1.Encode(rf.logOffset)
+	//rf.mu.Unlock()
+
+	data1 := w1.Bytes()
+
+	rf.persister.SaveStateAndSnapshot(data1, args.Data)
+
 	rf.mu.Unlock()
 }
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
