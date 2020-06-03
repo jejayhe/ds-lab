@@ -8,6 +8,36 @@ import (
 // import "time"
 import "fmt"
 
+//func TestBalance1(t *testing.T) {
+//	oldmap := map[int][]int{
+//		1: {4, 2},
+//		2: {3, 5},
+//		3: {0, 1, 6, 7, 8, 9},
+//		7: {},
+//	}
+//	balance(oldmap, make([]int, 0))
+//	for _, shards := range oldmap {
+//		if len(shards) > 3 || len(shards) < 2 {
+//			t.Fatalf("#{shards} not correct")
+//		}
+//	}
+//}
+//func TestBalance2(t *testing.T) {
+//	oldmap := map[int][]int{
+//		1: {4, 2},
+//		2: {3, 5},
+//		3: {},
+//		7: {},
+//		8: {},
+//	}
+//	unallocated := []int{0, 1, 6, 7, 8, 9}
+//	balance(oldmap, unallocated)
+//	for _, shards := range oldmap {
+//		if len(shards) != 2 {
+//			t.Fatalf("#{shards} not correct")
+//		}
+//	}
+//}
 func check(t *testing.T, groups []int, ck *Clerk) {
 	c := ck.Query(-1)
 	if len(c.Groups) != len(groups) {
