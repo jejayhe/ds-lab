@@ -30,7 +30,8 @@ type PutAppendArgs struct {
 }
 
 type PutAppendReply struct {
-	Err Err
+	Err         Err
+	WrongLeader bool
 }
 
 type GetArgs struct {
@@ -39,6 +40,18 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	Err   Err
-	Value string
+	Err         Err
+	Value       string
+	WrongLeader bool
+}
+
+type MigrateShardsArgs struct {
+	MigrateShards []int
+	ConfigNum     int
+}
+type MigrateShardsReply struct {
+	MigrateDict         map[string]string
+	MigrateClientSeqMap map[int64]int
+	Err                 Err
+	WrongLeader         bool
 }
