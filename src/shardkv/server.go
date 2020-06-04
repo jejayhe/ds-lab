@@ -46,8 +46,15 @@ const (
 	Optype_NewconfigMigrate
 )
 
+var OptypeDict = map[string]Optype{
+	"Get":    Optype_Get,
+	"Put":    Optype_Put,
+	"Append": Optype_Append,
+}
+
 type ReturnChanData struct {
 	Ok bool
+	V  string
 }
 
 type ShardKV struct {
@@ -66,21 +73,127 @@ type ShardKV struct {
 	smConfig     *shardmaster.Config
 	lastSmConfig *shardmaster.Config
 	acceptShards map[int]bool
-	taskShards   []int
+	taskShards   map[int]bool
 	dict         map[string]string
 	clientSeqMap map[int64]int
 	skvs         map[int][]*labrpc.ClientEnd
 
-	returnChanMap        map[int]chan ReturnChanData
-	reconfigureInProcess bool
+	returnChanMap map[int]chan ReturnChanData
+	//reconfigureInProcess bool
 }
 
+/*
+	if not leader
+
+	if shard is in taskShards, return "ErrDataNotReady"
+	if shard is in acceptShards, continue return ok / "ErrNoKey"
+	else return "ErrWrongGroup"
+*/
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if !kv.rf.IsLeader() {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	shard := key2shard(args.Key)
+	kv.mu.Lock()
+	if _, ok := kv.acceptShards[shard]; ok {
+		goto ShardKV_Get_Continue
+	} else if _, ok := kv.taskShards[shard]; ok {
+		reply.Err = ErrDataNotReady
+		kv.mu.Unlock()
+		return
+	} else {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
+ShardKV_Get_Continue:
+	op := Op{
+		K:         args.Key,
+		Opcode:    Optype_Get,
+		ClientId:  args.ClientId,
+		ClientSeq: args.ClientSeq,
+	}
+	DPrintf("[ShardKV %d] Get [K=%s] sent", kv.gid, args.Key)
+	logindex, _, _ := kv.rf.Start(op)
+	kv.mu.Lock()
+	if _, ok := kv.returnChanMap[logindex]; ok {
+		DPrintf("[ShardKV %d FATAL ERROR] Get returnChanMap already full", kv.gid)
+		kv.mu.Unlock()
+		reply.Err = "[ShardKV %d FATAL ERROR] Get returnChanMap already full"
+		return
+	}
+	returnChan := make(chan ReturnChanData)
+	kv.returnChanMap[logindex] = returnChan
+	kv.mu.Unlock()
+	select {
+	case data := <-returnChan:
+		reply.Err = OK
+		reply.Value = data.V
+		DPrintf("[ShardKV] Get get resp from ReturnChan")
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = "[ShardKV] Get get resp timeout"
+		DPrintf("[ShardKV] Get get resp timeout")
+		kv.mu.Lock()
+		delete(kv.returnChanMap, logindex)
+		kv.mu.Unlock()
+		return
+	}
+	return
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	if !kv.rf.IsLeader() {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	shard := key2shard(args.Key)
+	kv.mu.Lock()
+	if _, ok := kv.acceptShards[shard]; ok {
+		goto ShardKV_Get_Continue
+	} else if _, ok := kv.taskShards[shard]; ok {
+		reply.Err = ErrDataNotReady
+		kv.mu.Unlock()
+		return
+	} else {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
+ShardKV_Get_Continue:
+	op := Op{
+		K:         args.Key,
+		V:         args.Value,
+		Opcode:    OptypeDict[args.Op],
+		ClientId:  args.ClientId,
+		ClientSeq: args.ClientSeq,
+	}
+	DPrintf("[ShardKV %d] PutAppend [K=%s] [V=%s] [Op=%s] sent", kv.gid, args.Key, args.Value, args.Op)
+	logindex, _, _ := kv.rf.Start(op)
+	kv.mu.Lock()
+	if _, ok := kv.returnChanMap[logindex]; ok {
+		DPrintf("[ShardKV %d FATAL ERROR] PutAppend returnChanMap already full", kv.gid)
+		kv.mu.Unlock()
+		reply.Err = "[ShardKV %d FATAL ERROR] PutAppend returnChanMap already full"
+		return
+	}
+	returnChan := make(chan ReturnChanData)
+	kv.returnChanMap[logindex] = returnChan
+	kv.mu.Unlock()
+	select {
+	case <-returnChan:
+		DPrintf("[ShardKV] PutAppend get resp from ReturnChan")
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = "[ShardKV] PutAppend get resp timeout"
+		DPrintf("[ShardKV] PutAppend get resp timeout")
+		kv.mu.Lock()
+		delete(kv.returnChanMap, logindex)
+		kv.mu.Unlock()
+		return
+	}
+	return
 }
 
 //
@@ -148,27 +261,29 @@ func (kv *ShardKV) fetchShards(gid int, shards []int, doneCh chan bool) {
 		MigrateShards: shards,
 		ConfigNum:     kv.smConfig.Num,
 	}
-	for _, srv := range kv.skvs[gid] {
-		kv.mu.Unlock()
-		var reply MigrateShardsReply
-		ok := srv.Call("ShardKV.MigrateShards", args, &reply)
-		kv.mu.Lock()
-		if ok && reply.WrongLeader == false && reply.Err == "" {
-			op := Op{
-				Opcode:              Optype_NewconfigMigrate,
-				MigrateDict:         reply.MigrateDict,
-				MigrateClientSeqMap: reply.MigrateClientSeqMap,
-				MigrateShards:       shards,
+	if servers, ok := kv.lastSmConfig.Groups[gid]; ok {
+		for si := 0; si < len(servers); si++ {
+			srv := kv.make_end(servers[si])
+			kv.mu.Unlock()
+			var reply MigrateShardsReply
+			ok := srv.Call("ShardKV.MigrateShards", args, &reply)
+			kv.mu.Lock()
+			if ok && reply.WrongLeader == false && reply.Err == "" {
+				op := Op{
+					Opcode:              Optype_NewconfigMigrate,
+					MigrateDict:         reply.MigrateDict,
+					MigrateClientSeqMap: reply.MigrateClientSeqMap,
+					MigrateShards:       shards,
+				}
+				kv.rf.Start(op)
+				select {
+				case doneCh <- true:
+				default:
+				}
+				return
 			}
-			kv.rf.Start(op)
-			select {
-			case doneCh <- true:
-			default:
-			}
-			return
 		}
 	}
-
 }
 func (kv *ShardKV) reconfigure() {
 	// for leader while taskShards is not empty
@@ -178,7 +293,7 @@ func (kv *ShardKV) reconfigure() {
 			if len(kv.taskShards) != 0 {
 				// take a shard, find
 				taskGroup := make(map[int][]int) // map[gid] shards
-				for _, shard := range kv.taskShards {
+				for shard, _ := range kv.taskShards {
 					gid := kv.smConfig.Shards[shard]
 					taskGroup[gid] = append(taskGroup[gid], shard)
 				}
@@ -197,6 +312,9 @@ func (kv *ShardKV) reconfigure() {
 					case <-doneCh:
 						doneAcc++
 						if doneAcc == jobNum {
+							//kv.mu.Lock()
+							//kv.reconfigureInProcess = false
+							//kv.mu.Unlock()
 							break
 						}
 					case <-time.After(300 * time.Millisecond):
@@ -205,6 +323,7 @@ func (kv *ShardKV) reconfigure() {
 					}
 				}
 			} else {
+				//kv.reconfigureInProcess = false
 				kv.mu.Unlock()
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -217,7 +336,7 @@ func (kv *ShardKV) reconfigureStart() {
 	// accept shard that are in both oldShards and newShards
 	acceptShards := make(map[int]bool)
 	// taskShards are for fetching shard that are in newShards and not in oldShards
-	taskShards := make([]int, 0)
+	taskShards := make(map[int]bool)
 
 	oldShards := make(map[int]bool)
 	for shard, gid := range kv.lastSmConfig.Shards {
@@ -232,7 +351,7 @@ func (kv *ShardKV) reconfigureStart() {
 			if _, ok := oldShards[shard]; ok {
 				acceptShards[shard] = true
 			} else {
-				taskShards = append(taskShards, shard)
+				taskShards[shard] = true
 			}
 		}
 	}
@@ -241,12 +360,12 @@ func (kv *ShardKV) reconfigureStart() {
 }
 func (kv *ShardKV) migrationApplyDuplicatePositive(shards []int) bool {
 	// test if shards are in taskShards
-	taskShardMap := make(map[int]bool)
-	for _, shard := range kv.taskShards {
-		taskShardMap[shard] = true
-	}
+	//taskShardMap := make(map[int]bool)
+	//for _, shard := range kv.taskShards {
+	//	taskShardMap[shard] = true
+	//}
 	for _, shard := range shards {
-		if _, ok := taskShardMap[shard]; !ok {
+		if _, ok := kv.taskShards[shard]; !ok {
 			DPrintf("[ShardKV] migrationApplyDuplicateDetection detect DUPLICATE on gid %d", kv.gid)
 			return true
 		}
@@ -254,6 +373,19 @@ func (kv *ShardKV) migrationApplyDuplicatePositive(shards []int) bool {
 	return false
 }
 
+/*
+	if oldClientSeq<seq, renew seq and return true
+	else return false
+*/
+func CheckClientSeq(seqMap map[int64]int, clientSeq int, clientId int64) bool {
+	oldSeq, _ := seqMap[clientId]
+	if clientSeq > oldSeq {
+		seqMap[clientId] = clientSeq
+		return true
+	} else {
+		return false
+	}
+}
 func (kv *ShardKV) apply() {
 	for m := range kv.applyCh {
 		op := m.Command.(Op)
@@ -266,7 +398,7 @@ func (kv *ShardKV) apply() {
 				kv.smConfig = op.SmConfig
 				// refuse some shards, add some shards to tasklist.
 				kv.reconfigureStart()
-				kv.reconfigureInProcess = true
+				//kv.reconfigureInProcess = true
 			}
 			//if m.IsLeader {
 			//	ch, ok := kv.returnChanMap[m.CommandIndex]
@@ -293,6 +425,53 @@ func (kv *ShardKV) apply() {
 					kv.acceptShards[shard] = true
 				}
 			}
+		case Optype_Get:
+			v, _ := kv.dict[op.K]
+			if m.IsLeader {
+				ch, ok := kv.returnChanMap[m.CommandIndex]
+				if ok {
+					select {
+					case ch <- ReturnChanData{Ok: true, V: v}:
+					default:
+					}
+				}
+				delete(kv.returnChanMap, m.CommandIndex)
+			}
+		case Optype_Put:
+			if CheckClientSeq(kv.clientSeqMap, clientSeq, clientId) {
+				// todo do
+				kv.dict[op.K] = op.V
+			}
+			if m.IsLeader {
+				ch, ok := kv.returnChanMap[m.CommandIndex]
+				if ok {
+					select {
+					case ch <- ReturnChanData{Ok: true}:
+					default:
+					}
+				}
+				delete(kv.returnChanMap, m.CommandIndex)
+			}
+		case Optype_Append:
+			if CheckClientSeq(kv.clientSeqMap, clientSeq, clientId) {
+				// todo do
+				oldv, ok := kv.dict[op.K]
+				if ok {
+					kv.dict[op.K] = oldv + op.V
+				} else {
+					kv.dict[op.K] = op.V
+				}
+			}
+			if m.IsLeader {
+				ch, ok := kv.returnChanMap[m.CommandIndex]
+				if ok {
+					select {
+					case ch <- ReturnChanData{Ok: true}:
+					default:
+					}
+				}
+				delete(kv.returnChanMap, m.CommandIndex)
+			}
 		}
 		kv.mu.Unlock()
 	}
@@ -300,7 +479,7 @@ func (kv *ShardKV) apply() {
 
 func (kv *ShardKV) pollShardmasterConfig() {
 	for !kv.killed() {
-		for !kv.killed() && kv.rf.IsLeader() && !kv.reconfigureInProcess {
+		for !kv.killed() && kv.rf.IsLeader() && len(kv.taskShards) == 0 {
 			newconfig := kv.mck.Query(-1)
 			//changed := false
 			//for i := 0; i < len(oldconfig.Shards); i++ {
