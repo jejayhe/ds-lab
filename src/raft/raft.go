@@ -19,9 +19,9 @@ package raft
 
 import (
 	"bytes"
-	//"github.com/sasha-s/go-deadlock"
+	"github.com/sasha-s/go-deadlock"
 	"math/rand"
-	"sync"
+	//"sync"
 
 	//"sync"
 	"time"
@@ -55,8 +55,8 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	//mu deadlock.Mutex // Lock to protect shared access to this peer's state
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu deadlock.Mutex // Lock to protect shared access to this peer's state
+	//mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -446,7 +446,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// local log too few, refuse, need a smaller prevLogIndex
 		if args.PrevLogIndex >= rf.lenLog() {
-			DPrintf("[WARNING] too few local log ")
+			DPrintf("[WARNING] too few local log [prevLogIndex:%d] [rf.lenLog():%d]", args.PrevLogIndex, rf.lenLog())
 			reply.Xterm = -1
 			reply.Xlen = rf.lenLog()
 

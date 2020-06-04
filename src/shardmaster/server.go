@@ -2,14 +2,14 @@ package shardmaster
 
 import (
 	"../raft"
+	"github.com/sasha-s/go-deadlock"
 	"log"
 	"sync/atomic"
 )
 import "../labrpc"
-import "sync"
 import "../labgob"
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -19,7 +19,8 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type ShardMaster struct {
-	mu      sync.Mutex
+	//mu      sync.Mutex
+	mu      deadlock.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -32,6 +33,7 @@ type ShardMaster struct {
 
 	gidShardMap map[int][]int
 	groupNum    int
+	unallocated []int
 
 	dead int32 // set by Kill()
 }
@@ -47,9 +49,15 @@ const (
 
 type Op struct {
 	// Your data here.
-	Args     interface{}
+	//Args     interface{}
 	Opcode   Optype
 	ClientId int64
+
+	Servers map[int][]string
+	GIDs    []int
+	Shard   int
+	GID     int
+	Num     int
 }
 
 type ReturnChanData struct {
@@ -65,7 +73,8 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 		return
 	}
 	op := Op{
-		Args:     args,
+		//Args:     args,
+		Servers:  args.Servers,
 		Opcode:   Optype_join,
 		ClientId: args.ClientId,
 	}
@@ -136,21 +145,26 @@ func balance(oldmap map[int][]int, unallocated []int) {
 	}
 }
 
-func (sm *ShardMaster) join_exec(inputArgs interface{}) {
+func (sm *ShardMaster) join_exec(op Op) {
 	lastConfig := sm.configs[len(sm.configs)-1]
 	newGroup := make(map[int][]string)
 	for gid, serverNames := range lastConfig.Groups {
 		newGroup[gid] = serverNames
 	}
-	args := inputArgs.(*JoinArgs)
+	//args := inputArgs.(*JoinArgs)
 	extraGroupNum := 0
-	for gid, serverNames := range args.Servers {
+	for gid, serverNames := range op.Servers {
 		extraGroupNum++
 		newGroup[gid] = serverNames
 		sm.gidShardMap[gid] = make([]int, 0)
 	}
 	totalGroupNum := sm.groupNum + extraGroupNum
-	balance(sm.gidShardMap, make([]int, 0))
+	unallocated := make([]int, 0)
+	if sm.unallocated != nil {
+		unallocated = sm.unallocated
+		sm.unallocated = nil
+	}
+	balance(sm.gidShardMap, unallocated)
 	sm.groupNum = totalGroupNum
 	var newShards [NShards]int
 	for gid, shards := range sm.gidShardMap {
@@ -159,7 +173,7 @@ func (sm *ShardMaster) join_exec(inputArgs interface{}) {
 		}
 	}
 	newConfig := Config{
-		Num:    sm.groupNum,
+		Num:    len(sm.configs),
 		Shards: newShards,
 		Groups: newGroup,
 	}
@@ -174,7 +188,8 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		return
 	}
 	op := Op{
-		Args:     args,
+		//Args:     args,
+		GIDs:     args.GIDs,
 		Opcode:   Optype_leave,
 		ClientId: args.ClientId,
 	}
@@ -194,23 +209,27 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	return
 }
 
-func (sm *ShardMaster) leave_exec(inputArgs interface{}) {
+func (sm *ShardMaster) leave_exec(op Op) {
 	lastConfig := sm.configs[len(sm.configs)-1]
 	newGroup := make(map[int][]string)
 	for gid, serverNames := range lastConfig.Groups {
 		newGroup[gid] = serverNames
 	}
-	args := inputArgs.(*LeaveArgs)
+	//args := inputArgs.(*LeaveArgs)
 	extraGroupNum := 0
 	unallocated := make([]int, 0)
-	for _, gid := range args.GIDs {
+	for _, gid := range op.GIDs {
 		extraGroupNum++
 		delete(newGroup, gid)
 		unallocated = append(unallocated, sm.gidShardMap[gid]...)
 		delete(sm.gidShardMap, gid)
 	}
 	sm.groupNum -= extraGroupNum
-	balance(sm.gidShardMap, unallocated)
+	if sm.groupNum == 0 {
+		sm.unallocated = unallocated
+	} else {
+		balance(sm.gidShardMap, unallocated)
+	}
 	var newShards [NShards]int
 	for gid, shards := range sm.gidShardMap {
 		for _, shard := range shards {
@@ -218,7 +237,7 @@ func (sm *ShardMaster) leave_exec(inputArgs interface{}) {
 		}
 	}
 	newConfig := Config{
-		Num:    sm.groupNum,
+		Num:    len(sm.configs),
 		Shards: newShards,
 		Groups: newGroup,
 	}
@@ -233,7 +252,9 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 		return
 	}
 	op := Op{
-		Args:     args,
+		//Args:     args,
+		GID:      args.GID,
+		Shard:    args.Shard,
 		Opcode:   Optype_move,
 		ClientId: args.ClientId,
 	}
@@ -253,20 +274,20 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	return
 }
 
-func (sm *ShardMaster) move_exec(inputArgs interface{}) {
+func (sm *ShardMaster) move_exec(op Op) {
 	lastConfig := sm.configs[len(sm.configs)-1]
-	args := inputArgs.(*MoveArgs)
+	//args := inputArgs.(*MoveArgs)
 	needMove := false
 	for gid, shards := range sm.gidShardMap {
 		for i, shard := range shards {
-			if shard == args.Shard && gid != args.GID {
+			if shard == op.Shard && gid != op.GID {
 				needMove = true
 				sm.gidShardMap[gid] = append(shards[:i], shards[i+1:]...)
 			}
 		}
 	}
 	if needMove {
-		sm.gidShardMap[args.GID] = append(sm.gidShardMap[args.GID], args.Shard)
+		sm.gidShardMap[op.GID] = append(sm.gidShardMap[op.GID], op.Shard)
 	}
 	var newShards [NShards]int
 	for gid, shards := range sm.gidShardMap {
@@ -275,7 +296,7 @@ func (sm *ShardMaster) move_exec(inputArgs interface{}) {
 		}
 	}
 	newConfig := Config{
-		Num:    sm.groupNum,
+		Num:    len(sm.configs),
 		Shards: newShards,
 		Groups: lastConfig.Groups,
 	}
@@ -290,7 +311,8 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		return
 	}
 	op := Op{
-		Args:     args,
+		//Args:     args,
+		Num:      args.Num,
 		Opcode:   Optype_query,
 		ClientId: args.ClientId,
 	}
@@ -344,7 +366,7 @@ func (sm *ShardMaster) apply() {
 			oldLogIndex, _ = sm.clientLogindexMap[clientId]
 			if m.CommandIndex > oldLogIndex {
 				// todo do
-				sm.join_exec(op.Args)
+				sm.join_exec(op)
 				sm.clientLogindexMap[clientId] = m.CommandIndex
 			}
 			if m.IsLeader {
@@ -362,7 +384,7 @@ func (sm *ShardMaster) apply() {
 			oldLogIndex, _ = sm.clientLogindexMap[clientId]
 			if m.CommandIndex > oldLogIndex {
 				// todo do
-				sm.leave_exec(op.Args)
+				sm.leave_exec(op)
 				sm.clientLogindexMap[clientId] = m.CommandIndex
 			}
 			if m.IsLeader {
@@ -380,7 +402,7 @@ func (sm *ShardMaster) apply() {
 			oldLogIndex, _ = sm.clientLogindexMap[clientId]
 			if m.CommandIndex > oldLogIndex {
 				// todo do
-				sm.move_exec(op.Args)
+				sm.move_exec(op)
 				sm.clientLogindexMap[clientId] = m.CommandIndex
 			}
 			if m.IsLeader {
@@ -401,29 +423,33 @@ func (sm *ShardMaster) apply() {
 			//	sm.join_exec(op.Args)
 			//	sm.clientLogindexMap[clientId] = m.CommandIndex
 			//}
-			args := op.Args.(*QueryArgs)
+			//args := op.Args.(*QueryArgs)
 			var config *Config
-			if args.Num < 0 || args.Num >= len(sm.configs) {
+			if op.Num < 0 || op.Num >= len(sm.configs) {
 				config = &(sm.configs[len(sm.configs)-1])
 			} else {
-				config = &(sm.configs[args.Num])
+				config = &(sm.configs[op.Num])
 			}
 			if m.IsLeader {
 				ch, ok := sm.returnChanMap[m.CommandIndex]
 				if ok {
 					select {
 					case ch <- ReturnChanData{Ok: true, Config: config}:
+					//case ch <- ReturnChanData{Ok: true, Config: nil}:
 					default:
 					}
 				}
 				delete(sm.returnChanMap, m.CommandIndex)
 			}
 		}
-
+		if m.IsLeader {
+			DPrintf("[APPLIED] ShardMaster applied msg:%+v", sm.gidShardMap)
+		}
 		sm.mu.Unlock()
 		if sm.killed() {
 			break
 		}
+
 	}
 }
 
@@ -438,7 +464,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.me = me
 
 	sm.configs = make([]Config, 1)
-	sm.configs[0].Groups = map[int][]string{}
 
 	labgob.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
@@ -447,6 +472,20 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	// Your code here.
 	sm.returnChanMap = make(map[int]chan ReturnChanData)
 	sm.clientLogindexMap = make(map[int64]int)
+	sm.gidShardMap = make(map[int][]int)
+	sm.unallocated = make([]int, 0)
+	for i := 0; i < NShards; i++ {
+		sm.unallocated = append(sm.unallocated, i)
+	}
+	var shards [NShards]int
+	sm.groupNum = 0
+	sm.configs[0] = Config{
+		Num:    0,
+		Shards: shards,
+		Groups: make(map[int][]string),
+	}
+
+	// init config
 
 	go sm.apply()
 	return sm

@@ -46,8 +46,11 @@ func (ck *Clerk) Query(num int) Config {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply QueryReply
+			//DPrintf("[CLERK] Query server %d with args:%+v", i, args)
 			ok := srv.Call("ShardMaster.Query", args, &reply)
+			//DPrintf("[CLERK] Query server %d get reply:%+v ok:%v", i, reply, ok)
 			if ok && reply.WrongLeader == false {
+				//DPrintf("[CLERK ERROR server %d] why I don't stop here ?? ", i)
 				return reply.Config
 			}
 		}
