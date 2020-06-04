@@ -15,9 +15,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
-	i  int // server chosen
-	mu sync.Mutex
-	id int64
+	i   int // server chosen
+	mu  sync.Mutex
+	id  int64
+	seq int
 }
 
 func nrand() int64 {
@@ -42,6 +43,10 @@ func (ck *Clerk) Query(num int) Config {
 	// Your code here.
 	args.Num = num
 	args.ClientId = ck.id
+	ck.mu.Lock()
+	ck.seq++
+	args.ClientSeq = ck.seq
+	ck.mu.Unlock()
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -49,7 +54,7 @@ func (ck *Clerk) Query(num int) Config {
 			//DPrintf("[CLERK] Query server %d with args:%+v", i, args)
 			ok := srv.Call("ShardMaster.Query", args, &reply)
 			//DPrintf("[CLERK] Query server %d get reply:%+v ok:%v", i, reply, ok)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.WrongLeader == false && reply.Err == "" {
 				//DPrintf("[CLERK ERROR server %d] why I don't stop here ?? ", i)
 				return reply.Config
 			}
@@ -63,6 +68,10 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	// Your code here.
 	args.Servers = servers
 	args.ClientId = ck.id
+	ck.mu.Lock()
+	ck.seq++
+	args.ClientSeq = ck.seq
+	ck.mu.Unlock()
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -81,7 +90,10 @@ func (ck *Clerk) Leave(gids []int) {
 	// Your code here.
 	args.GIDs = gids
 	args.ClientId = ck.id
-
+	ck.mu.Lock()
+	ck.seq++
+	args.ClientSeq = ck.seq
+	ck.mu.Unlock()
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -101,7 +113,10 @@ func (ck *Clerk) Move(shard int, gid int) {
 	args.Shard = shard
 	args.GID = gid
 	args.ClientId = ck.id
-
+	ck.mu.Lock()
+	ck.seq++
+	args.ClientSeq = ck.seq
+	ck.mu.Unlock()
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {

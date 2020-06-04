@@ -5,6 +5,7 @@ import (
 	"github.com/sasha-s/go-deadlock"
 	"log"
 	"sync/atomic"
+	"time"
 )
 import "../labrpc"
 import "../labgob"
@@ -27,9 +28,9 @@ type ShardMaster struct {
 
 	// Your data here.
 
-	configs           []Config // indexed by config num
-	returnChanMap     map[int]chan ReturnChanData
-	clientLogindexMap map[int64]int // record client max log index
+	configs       []Config // indexed by config num
+	returnChanMap map[int]chan ReturnChanData
+	clientSeqMap  map[int64]int // record client max log index
 
 	gidShardMap map[int][]int
 	groupNum    int
@@ -50,8 +51,9 @@ const (
 type Op struct {
 	// Your data here.
 	//Args     interface{}
-	Opcode   Optype
-	ClientId int64
+	Opcode    Optype
+	ClientId  int64
+	ClientSeq int
 
 	Servers map[int][]string
 	GIDs    []int
@@ -74,9 +76,10 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	}
 	op := Op{
 		//Args:     args,
-		Servers:  args.Servers,
-		Opcode:   Optype_join,
-		ClientId: args.ClientId,
+		Servers:   args.Servers,
+		Opcode:    Optype_join,
+		ClientId:  args.ClientId,
+		ClientSeq: args.ClientSeq,
 	}
 	DPrintf("[ShardMaster %d] Join [args=%+v] sent", sm.me, args)
 	sm.mu.Lock()
@@ -84,13 +87,23 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	if _, ok := sm.returnChanMap[logindex]; ok {
 		DPrintf("[ShardMaster %d FATAL ERROR] Join returnChanMap already full", sm.me)
 		sm.mu.Unlock()
+		reply.Err = "[ShardMaster %d FATAL ERROR] Join returnChanMap already full"
 		return
 	}
 	returnChan := make(chan ReturnChanData)
 	sm.returnChanMap[logindex] = returnChan
 	sm.mu.Unlock()
-	<-returnChan
-	DPrintf("[ShardMaster] Join get resp from ReturnChan")
+	select {
+	case <-returnChan:
+		DPrintf("[ShardMaster] Join get resp from ReturnChan")
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = "[ShardMaster] Join get resp timeout"
+		DPrintf("[ShardMaster] Join get resp timeout")
+		sm.mu.Lock()
+		delete(sm.returnChanMap, logindex)
+		sm.mu.Unlock()
+		return
+	}
 	return
 }
 
@@ -189,9 +202,10 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	}
 	op := Op{
 		//Args:     args,
-		GIDs:     args.GIDs,
-		Opcode:   Optype_leave,
-		ClientId: args.ClientId,
+		GIDs:      args.GIDs,
+		Opcode:    Optype_leave,
+		ClientId:  args.ClientId,
+		ClientSeq: args.ClientSeq,
 	}
 	DPrintf("[ShardMaster %d] Leave [args=%+v] sent", sm.me, args)
 	sm.mu.Lock()
@@ -204,8 +218,17 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	returnChan := make(chan ReturnChanData)
 	sm.returnChanMap[logindex] = returnChan
 	sm.mu.Unlock()
-	<-returnChan
-	DPrintf("[ShardMaster] Leave get resp from ReturnChan")
+	select {
+	case <-returnChan:
+		DPrintf("[ShardMaster] Leave get resp from ReturnChan")
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = "[ShardMaster] Leave get resp timeout"
+		DPrintf("[ShardMaster] Leave get resp timeout")
+		sm.mu.Lock()
+		delete(sm.returnChanMap, logindex)
+		sm.mu.Unlock()
+		return
+	}
 	return
 }
 
@@ -253,10 +276,11 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	}
 	op := Op{
 		//Args:     args,
-		GID:      args.GID,
-		Shard:    args.Shard,
-		Opcode:   Optype_move,
-		ClientId: args.ClientId,
+		GID:       args.GID,
+		Shard:     args.Shard,
+		Opcode:    Optype_move,
+		ClientId:  args.ClientId,
+		ClientSeq: args.ClientSeq,
 	}
 	DPrintf("[ShardMaster %d] Move [args=%+v] sent", sm.me, args)
 	sm.mu.Lock()
@@ -269,8 +293,17 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	returnChan := make(chan ReturnChanData)
 	sm.returnChanMap[logindex] = returnChan
 	sm.mu.Unlock()
-	<-returnChan
-	DPrintf("[ShardMaster] Move get resp from ReturnChan")
+	select {
+	case <-returnChan:
+		DPrintf("[ShardMaster] Move get resp from ReturnChan")
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = "[ShardMaster] Move get resp timeout"
+		DPrintf("[ShardMaster] Move get resp timeout")
+		sm.mu.Lock()
+		delete(sm.returnChanMap, logindex)
+		sm.mu.Unlock()
+		return
+	}
 	return
 }
 
@@ -312,9 +345,10 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	}
 	op := Op{
 		//Args:     args,
-		Num:      args.Num,
-		Opcode:   Optype_query,
-		ClientId: args.ClientId,
+		Num:       args.Num,
+		Opcode:    Optype_query,
+		ClientId:  args.ClientId,
+		ClientSeq: args.ClientSeq,
 	}
 	DPrintf("[ShardMaster %d] Query [args=%+v] sent", sm.me, args)
 	sm.mu.Lock()
@@ -327,9 +361,18 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	returnChan := make(chan ReturnChanData)
 	sm.returnChanMap[logindex] = returnChan
 	sm.mu.Unlock()
-	data := <-returnChan
-	reply.Config = *data.Config
-	DPrintf("[ShardMaster] Query get resp from ReturnChan")
+	select {
+	case data := <-returnChan:
+		reply.Config = *data.Config
+		DPrintf("[ShardMaster] Query get resp from ReturnChan")
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = "[ShardMaster] Query get resp timeout"
+		DPrintf("[ShardMaster] Query get resp timeout")
+		sm.mu.Lock()
+		delete(sm.returnChanMap, logindex)
+		sm.mu.Unlock()
+		return
+	}
 	return
 }
 
@@ -355,19 +398,30 @@ func (sm *ShardMaster) Raft() *raft.Raft {
 	return sm.rf
 }
 
+/*
+	if oldClientSeq<seq, renew seq and return true
+	else return false
+*/
+func CheckClientSeq(seqMap map[int64]int, clientSeq int, clientId int64) bool {
+	oldSeq, _ := seqMap[clientId]
+	if clientSeq > oldSeq {
+		seqMap[clientId] = clientSeq
+		return true
+	} else {
+		return false
+	}
+}
 func (sm *ShardMaster) apply() {
 	for m := range sm.applyCh {
 		op := m.Command.(Op)
 		clientId := op.ClientId
+		clientSeq := op.ClientSeq
 		sm.mu.Lock()
 		switch op.Opcode {
 		case Optype_join:
-			oldLogIndex := 0
-			oldLogIndex, _ = sm.clientLogindexMap[clientId]
-			if m.CommandIndex > oldLogIndex {
+			if CheckClientSeq(sm.clientSeqMap, clientSeq, clientId) {
 				// todo do
 				sm.join_exec(op)
-				sm.clientLogindexMap[clientId] = m.CommandIndex
 			}
 			if m.IsLeader {
 				ch, ok := sm.returnChanMap[m.CommandIndex]
@@ -380,12 +434,9 @@ func (sm *ShardMaster) apply() {
 				delete(sm.returnChanMap, m.CommandIndex)
 			}
 		case Optype_leave:
-			oldLogIndex := 0
-			oldLogIndex, _ = sm.clientLogindexMap[clientId]
-			if m.CommandIndex > oldLogIndex {
+			if CheckClientSeq(sm.clientSeqMap, clientSeq, clientId) {
 				// todo do
 				sm.leave_exec(op)
-				sm.clientLogindexMap[clientId] = m.CommandIndex
 			}
 			if m.IsLeader {
 				ch, ok := sm.returnChanMap[m.CommandIndex]
@@ -398,12 +449,9 @@ func (sm *ShardMaster) apply() {
 				delete(sm.returnChanMap, m.CommandIndex)
 			}
 		case Optype_move:
-			oldLogIndex := 0
-			oldLogIndex, _ = sm.clientLogindexMap[clientId]
-			if m.CommandIndex > oldLogIndex {
+			if CheckClientSeq(sm.clientSeqMap, clientSeq, clientId) {
 				// todo do
 				sm.move_exec(op)
-				sm.clientLogindexMap[clientId] = m.CommandIndex
 			}
 			if m.IsLeader {
 				ch, ok := sm.returnChanMap[m.CommandIndex]
@@ -419,7 +467,6 @@ func (sm *ShardMaster) apply() {
 			//oldLogIndex := 0
 			//oldLogIndex, _ = sm.clientLogindexMap[clientId]
 			//if m.CommandIndex > oldLogIndex {
-			//	// todo do
 			//	sm.join_exec(op.Args)
 			//	sm.clientLogindexMap[clientId] = m.CommandIndex
 			//}
@@ -471,7 +518,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// Your code here.
 	sm.returnChanMap = make(map[int]chan ReturnChanData)
-	sm.clientLogindexMap = make(map[int64]int)
+	sm.clientSeqMap = make(map[int64]int)
 	sm.gidShardMap = make(map[int][]int)
 	sm.unallocated = make([]int, 0)
 	for i := 0; i < NShards; i++ {
