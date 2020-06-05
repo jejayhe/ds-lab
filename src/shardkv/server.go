@@ -131,9 +131,14 @@ ShardKV_Get_Continue:
 	kv.mu.Unlock()
 	select {
 	case data := <-returnChan:
-		reply.Err = OK
-		reply.Value = data.V
-		DPrintf("[ShardKV] Get get resp from ReturnChan")
+		if data.Ok {
+			reply.Err = OK
+			reply.Value = data.V
+			DPrintf("[ShardKV] Get get resp from ReturnChan")
+		} else {
+			reply.Err = ErrWrongGroup
+			DPrintf("[ShardKV] Get get resp from ReturnChan ErrWrongGroup")
+		}
 	case <-time.After(300 * time.Millisecond):
 		reply.Err = "[ShardKV] Get get resp timeout"
 		DPrintf("[ShardKV] Get get resp timeout")
@@ -185,9 +190,15 @@ ShardKV_Put_Continue:
 	kv.returnChanMap[logindex] = returnChan
 	kv.mu.Unlock()
 	select {
-	case <-returnChan:
-		DPrintf("[ShardKV] PutAppend get resp from ReturnChan")
-		reply.Err = OK
+	case ret := <-returnChan:
+		if ret.Ok {
+			DPrintf("[ShardKV] PutAppend get resp from ReturnChan")
+			reply.Err = OK
+		} else {
+			DPrintf("[ShardKV] PutAppend get resp from ReturnChan")
+			reply.Err = ErrWrongGroup
+		}
+
 	case <-time.After(300 * time.Millisecond):
 		reply.Err = "[ShardKV] PutAppend get resp timeout"
 		DPrintf("[ShardKV] PutAppend get resp timeout")
@@ -496,53 +507,91 @@ func (kv *ShardKV) apply() {
 				}
 			}
 		case Optype_Get:
-			v, _ := kv.dict[op.K]
+			shard := key2shard(op.K)
+			if _, ok := kv.acceptShards[shard]; !ok {
+				ch, ok := kv.returnChanMap[m.CommandIndex]
+				if ok {
+					select {
+					case ch <- ReturnChanData{Ok: false, V: ""}:
+					default:
+					}
+				}
+				delete(kv.returnChanMap, m.CommandIndex)
+			} else {
+				v, _ := kv.dict[op.K]
 
-			if m.IsLeader {
-				//DPrintf("[DEBUG] gid:%d kv.dict:%+v", kv.gid, kv.dict)
-				ch, ok := kv.returnChanMap[m.CommandIndex]
-				if ok {
-					select {
-					case ch <- ReturnChanData{Ok: true, V: v}:
-					default:
+				if m.IsLeader {
+					//DPrintf("[DEBUG] gid:%d kv.dict:%+v", kv.gid, kv.dict)
+					ch, ok := kv.returnChanMap[m.CommandIndex]
+					if ok {
+						select {
+						case ch <- ReturnChanData{Ok: true, V: v}:
+						default:
+						}
 					}
+					delete(kv.returnChanMap, m.CommandIndex)
 				}
-				delete(kv.returnChanMap, m.CommandIndex)
 			}
+
 		case Optype_Put:
-			if CheckClientSeq(kv.clientSeqMap, clientSeq, clientId) {
-				// todo do
-				kv.dict[op.K] = op.V
-			}
-			if m.IsLeader {
+			shard := key2shard(op.K)
+			if _, ok := kv.acceptShards[shard]; !ok {
 				ch, ok := kv.returnChanMap[m.CommandIndex]
 				if ok {
 					select {
-					case ch <- ReturnChanData{Ok: true}:
+					case ch <- ReturnChanData{Ok: false}:
 					default:
 					}
 				}
 				delete(kv.returnChanMap, m.CommandIndex)
-			}
-		case Optype_Append:
-			if CheckClientSeq(kv.clientSeqMap, clientSeq, clientId) {
-				// todo do
-				oldv, ok := kv.dict[op.K]
-				if ok {
-					kv.dict[op.K] = oldv + op.V
-				} else {
+			} else {
+				if CheckClientSeq(kv.clientSeqMap, clientSeq, clientId) {
+					// todo do
 					kv.dict[op.K] = op.V
 				}
+				if m.IsLeader {
+					ch, ok := kv.returnChanMap[m.CommandIndex]
+					if ok {
+						select {
+						case ch <- ReturnChanData{Ok: true}:
+						default:
+						}
+					}
+					delete(kv.returnChanMap, m.CommandIndex)
+				}
 			}
-			if m.IsLeader {
+
+		case Optype_Append:
+			shard := key2shard(op.K)
+			if _, ok := kv.acceptShards[shard]; !ok {
 				ch, ok := kv.returnChanMap[m.CommandIndex]
 				if ok {
 					select {
-					case ch <- ReturnChanData{Ok: true}:
+					case ch <- ReturnChanData{Ok: false}:
 					default:
 					}
 				}
 				delete(kv.returnChanMap, m.CommandIndex)
+			} else {
+				if CheckClientSeq(kv.clientSeqMap, clientSeq, clientId) {
+					// todo do
+					oldv, ok := kv.dict[op.K]
+					if ok {
+						kv.dict[op.K] = oldv + op.V
+					} else {
+						kv.dict[op.K] = op.V
+					}
+				}
+				if m.IsLeader {
+					ch, ok := kv.returnChanMap[m.CommandIndex]
+					if ok {
+						select {
+						case ch <- ReturnChanData{Ok: true}:
+						default:
+						}
+					}
+					delete(kv.returnChanMap, m.CommandIndex)
+				}
 			}
 		}
 		kv.mu.Unlock()
