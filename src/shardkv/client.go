@@ -92,11 +92,15 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					//DPrintf("[Clerk] Get reply:%+v", reply)
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
+					//DPrintf("[Clerk] Get ErrWrongGroup reply:%+v", reply)
 					break
 				}
+
+				//DPrintf("[Clerk] Get other error reply:%+v", reply)
 				// ... not ok, or ErrWrongLeader
 			}
 		}

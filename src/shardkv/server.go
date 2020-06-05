@@ -2,6 +2,7 @@ package shardkv
 
 import (
 	"../shardmaster"
+	"bytes"
 	"github.com/sasha-s/go-deadlock"
 	"log"
 	"sync/atomic"
@@ -411,6 +412,36 @@ func CheckClientSeq(seqMap map[int64]int, clientSeq int, clientId int64) bool {
 }
 func (kv *ShardKV) apply() {
 	for m := range kv.applyCh {
+		if m.Snapshot != nil {
+			r := bytes.NewBuffer(m.Snapshot)
+			d := labgob.NewDecoder(r)
+			dict1 := make(map[string]string)
+			dict2 := make(map[int64]int)
+			var config1 shardmaster.Config
+			var config2 shardmaster.Config
+			acceptShards := make(map[int]bool)
+			taskShards := make(map[int]bool)
+			if d.Decode(&dict1) != nil ||
+				d.Decode(&dict2) != nil ||
+				d.Decode(&config1) != nil ||
+				d.Decode(&config2) != nil ||
+				d.Decode(&acceptShards) != nil ||
+				d.Decode(&taskShards) != nil {
+				DPrintf("[ERROR] ShardKV.apply m.Snapshot")
+			} else {
+				kv.mu.Lock()
+				kv.dict = dict1
+				kv.clientSeqMap = dict2
+				kv.lastSmConfig = &config1
+				kv.smConfig = &config2
+				kv.acceptShards = acceptShards
+				kv.taskShards = taskShards
+				DPrintf("[SNAPSHOT] ShardKV.apply server %d successfully apply", kv.me)
+				DPrintf("[ShardKV %d] dict:[%v] seqMap:[%v]config1:[%+v], config2:[%+v]", kv.me, kv.dict, kv.clientSeqMap, kv.lastSmConfig, kv.smConfig)
+				kv.mu.Unlock()
+			}
+			continue
+		}
 		op := m.Command.(Op)
 		clientId := op.ClientId
 		clientSeq := op.ClientSeq
@@ -425,14 +456,14 @@ func (kv *ShardKV) apply() {
 
 				kv.reconfigureStart()
 				//kv.lastSmConfig = oldconfig
-				if kv.gid == 101 {
-					DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v].......................", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
-
-				}
-				//DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v].......................", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
-				//if m.IsLeader {
-				//	DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v]", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+				//if kv.gid == 101 {
+				//	DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v].......................", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+				//
 				//}
+				//DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v].......................", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+				if m.IsLeader {
+					DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v]", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+				}
 				//kv.reconfigureInProcess = true
 			}
 			//if m.IsLeader {
@@ -468,7 +499,7 @@ func (kv *ShardKV) apply() {
 			v, _ := kv.dict[op.K]
 
 			if m.IsLeader {
-				DPrintf("[DEBUG] gid:%d kv.dict:%+v", kv.gid, kv.dict)
+				//DPrintf("[DEBUG] gid:%d kv.dict:%+v", kv.gid, kv.dict)
 				ch, ok := kv.returnChanMap[m.CommandIndex]
 				if ok {
 					select {
@@ -515,6 +546,27 @@ func (kv *ShardKV) apply() {
 			}
 		}
 		kv.mu.Unlock()
+		kv.rf.UpdateLastApplied(m.CommandIndex)
+		if kv.killed() {
+			break
+		}
+		if kv.rf.TimeForSnapshot(kv.maxraftstate) {
+			DPrintf("[SNAPSHOT] shardkv take snapshot ...")
+			// take snapshot
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+
+			kv.mu.Lock()
+			e.Encode(kv.dict)
+			e.Encode(kv.clientSeqMap)
+			e.Encode(kv.lastSmConfig)
+			e.Encode(kv.smConfig)
+			e.Encode(kv.acceptShards)
+			e.Encode(kv.taskShards)
+			kv.mu.Unlock()
+			data := w.Bytes()
+			kv.rf.TakeSnapshot(data, -1, -1)
+		}
 	}
 }
 
@@ -527,7 +579,7 @@ func (kv *ShardKV) taskShardsIsEmpty() bool {
 func (kv *ShardKV) pollShardmasterConfig() {
 	for !kv.killed() {
 		for !kv.killed() && kv.rf.IsLeader() && kv.taskShardsIsEmpty() {
-			//DPrintf("[SHARDKV POLL] checking config...")
+			DPrintf("[SHARDKV POLL] checking config...")
 			kv.mu.Lock()
 			oldNum := kv.smConfig.Num
 			kv.mu.Unlock()
@@ -618,8 +670,47 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.returnChanMap = make(map[int]chan ReturnChanData)
 	kv.clientSeqMap = make(map[int64]int)
 	kv.dict = make(map[string]string)
+	kv.restoreSnapShot()
 	go kv.apply()
 	go kv.pollShardmasterConfig()
 	go kv.reconfigure()
 	return kv
+}
+
+func (kv *ShardKV) restoreSnapShot() {
+	DPrintf("[DEBUG] restoring from snapshot-----------------------")
+	//kv.testRestoreSnapShot()
+	data := kv.rf.RestoreSnapshot()
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	dict1 := make(map[string]string)
+	dict2 := make(map[int64]int)
+	var config1 shardmaster.Config
+	var config2 shardmaster.Config
+	acceptShards := make(map[int]bool)
+	taskShards := make(map[int]bool)
+	if d.Decode(&dict1) != nil ||
+		d.Decode(&dict2) != nil ||
+		d.Decode(&config1) != nil ||
+		d.Decode(&config2) != nil ||
+		d.Decode(&acceptShards) != nil ||
+		d.Decode(&taskShards) != nil {
+		DPrintf("[ERROR] ShardKV.restoreSnapShot")
+	} else {
+		kv.mu.Lock()
+		kv.dict = dict1
+		kv.clientSeqMap = dict2
+		kv.lastSmConfig = &config1
+		kv.smConfig = &config2
+		kv.acceptShards = acceptShards
+		kv.taskShards = taskShards
+		//DPrintf("[DEBUG] restoring from snapshot------------------SUCCESS-----[kv.dict:%+v] [seqMap:%+v] [lastSmConfig:%+v] [smConfig:%+v]",
+		//	kv.dict, kv.clientSeqMap, kv.lastSmConfig, kv.smConfig)
+		DPrintf("[DEBUG] restoring from snapshot------------------SUCCESS-----[gid:%d] [lastSmConfig:%+v] [smConfig:%+v]",
+			kv.gid, kv.lastSmConfig, kv.smConfig)
+		kv.mu.Unlock()
+	}
 }
