@@ -8,7 +8,10 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"github.com/sasha-s/go-deadlock"
+)
 import "crypto/rand"
 import "math/big"
 import "../shardmaster"
@@ -40,6 +43,9 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	id  int64
+	seq int
+	mu  deadlock.Mutex
 }
 
 //
@@ -56,6 +62,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.id = nrand()
 	return ck
 }
 
@@ -68,6 +75,12 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+
+	args.ClientId = ck.id
+	ck.mu.Lock()
+	ck.seq++
+	args.ClientSeq = ck.seq
+	ck.mu.Unlock()
 
 	for {
 		shard := key2shard(key)
@@ -104,7 +117,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClientId = ck.id
+	ck.mu.Lock()
+	ck.seq++
+	args.ClientSeq = ck.seq
+	ck.mu.Unlock()
 
 	for {
 		shard := key2shard(key)
@@ -113,7 +130,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+				//DPrintf("[SHARDKV CLERK] PutAppend [args:+%v]", args)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				//DPrintf("[SHARDKV CLERK] PutAppend get resp [reply:+%v]", reply)
 				if ok && reply.Err == OK {
 					return
 				}

@@ -49,7 +49,9 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "../labgob"
+import (
+	"../labgob"
+)
 import "bytes"
 import "reflect"
 import "sync"
@@ -464,9 +466,17 @@ func MakeService(rcvr interface{}) *Service {
 			mtype.NumOut() != 0 {
 			// the method is not suitable for a handler
 			//fmt.Printf("bad method: %v\n", mname)
+			//if mtype.NumIn() != 3 {
+			//	fmt.Printf("mtype.NumIn() != 3 \n")
+			//} else if mtype.In(2).Kind() != reflect.Ptr {
+			//	fmt.Printf("mtype.In(2).Kind() != reflect.Ptr \n")
+			//} else if mtype.NumOut() != 0 {
+			//	fmt.Printf("mtype.NumOut() != 0 \n")
+			//}
 		} else {
 			// the method looks like a handler
 			svc.methods[mname] = method
+			//fmt.Printf("adding method:%s.%s \n", svc.name, mname)
 		}
 	}
 

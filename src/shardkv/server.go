@@ -2,16 +2,16 @@ package shardkv
 
 import (
 	"../shardmaster"
+	"github.com/sasha-s/go-deadlock"
 	"log"
 	"sync/atomic"
 	"time"
 )
 import "../labrpc"
 import "../raft"
-import "sync"
 import "../labgob"
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -58,7 +58,8 @@ type ReturnChanData struct {
 }
 
 type ShardKV struct {
-	mu           sync.Mutex
+	//mu           sync.Mutex
+	mu           deadlock.Mutex
 	me           int
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
@@ -117,7 +118,7 @@ ShardKV_Get_Continue:
 	}
 	DPrintf("[ShardKV %d] Get [K=%s] sent", kv.gid, args.Key)
 	logindex, _, _ := kv.rf.Start(op)
-	kv.mu.Lock()
+	//kv.mu.Lock()
 	if _, ok := kv.returnChanMap[logindex]; ok {
 		DPrintf("[ShardKV %d FATAL ERROR] Get returnChanMap already full", kv.gid)
 		kv.mu.Unlock()
@@ -152,7 +153,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	shard := key2shard(args.Key)
 	kv.mu.Lock()
 	if _, ok := kv.acceptShards[shard]; ok {
-		goto ShardKV_Get_Continue
+		goto ShardKV_Put_Continue
 	} else if _, ok := kv.taskShards[shard]; ok {
 		reply.Err = ErrDataNotReady
 		kv.mu.Unlock()
@@ -162,7 +163,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-ShardKV_Get_Continue:
+ShardKV_Put_Continue:
 	op := Op{
 		K:         args.Key,
 		V:         args.Value,
@@ -172,7 +173,7 @@ ShardKV_Get_Continue:
 	}
 	DPrintf("[ShardKV %d] PutAppend [K=%s] [V=%s] [Op=%s] sent", kv.gid, args.Key, args.Value, args.Op)
 	logindex, _, _ := kv.rf.Start(op)
-	kv.mu.Lock()
+	//kv.mu.Lock()
 	if _, ok := kv.returnChanMap[logindex]; ok {
 		DPrintf("[ShardKV %d FATAL ERROR] PutAppend returnChanMap already full", kv.gid)
 		kv.mu.Unlock()
@@ -185,6 +186,7 @@ ShardKV_Get_Continue:
 	select {
 	case <-returnChan:
 		DPrintf("[ShardKV] PutAppend get resp from ReturnChan")
+		reply.Err = OK
 	case <-time.After(300 * time.Millisecond):
 		reply.Err = "[ShardKV] PutAppend get resp timeout"
 		DPrintf("[ShardKV] PutAppend get resp timeout")
@@ -212,10 +214,10 @@ func (kv *ShardKV) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
 }
-func (kv *ShardKV) MigrateShards(args MigrateShardsArgs, reply MigrateShardsReply) {
+func (kv *ShardKV) MigrateShards(args *MigrateShardsArgs, reply *MigrateShardsReply) {
 	kv.mu.Lock()
 	if args.ConfigNum > kv.smConfig.Num {
-		DPrintf("[ShardKV] MigrateShards not ready on gid %", kv.gid)
+		DPrintf("[ShardKV] MigrateShards not ready on gid %d", kv.gid)
 		kv.mu.Unlock()
 		reply.Err = "[ShardKV] MigrateShards not ready"
 		return
@@ -240,7 +242,7 @@ func (kv *ShardKV) MigrateShards(args MigrateShardsArgs, reply MigrateShardsRepl
 			migrateDict[k] = v
 		}
 	}
-
+	DPrintf("[DEBUG] [migrateDict:%+v] [kv.dict:%+v]", migrateDict, kv.dict)
 	// fetch clientId seq
 	clientSeqMap := make(map[int64]int)
 	for k, v := range kv.clientSeqMap {
@@ -253,7 +255,18 @@ func (kv *ShardKV) MigrateShards(args MigrateShardsArgs, reply MigrateShardsRepl
 }
 func (kv *ShardKV) fetchShards(gid int, shards []int, doneCh chan bool) {
 	if gid == 0 {
-		doneCh <- true
+		DPrintf("[FETCH SHARDS] gid=0 so returns")
+		op := Op{
+			Opcode:              Optype_NewconfigMigrate,
+			MigrateDict:         make(map[string]string),
+			MigrateClientSeqMap: make(map[int64]int),
+			MigrateShards:       shards,
+		}
+		kv.rf.Start(op)
+		select {
+		case doneCh <- true:
+		default:
+		}
 		return
 	}
 	kv.mu.Lock()
@@ -261,13 +274,15 @@ func (kv *ShardKV) fetchShards(gid int, shards []int, doneCh chan bool) {
 		MigrateShards: shards,
 		ConfigNum:     kv.smConfig.Num,
 	}
-	if servers, ok := kv.lastSmConfig.Groups[gid]; ok {
+	groups := kv.lastSmConfig.Groups
+	kv.mu.Unlock()
+	if servers, ok := groups[gid]; ok {
 		for si := 0; si < len(servers); si++ {
 			srv := kv.make_end(servers[si])
-			kv.mu.Unlock()
+			DPrintf("[FETCH SHARDS] request sent with [args:%+v]", args)
 			var reply MigrateShardsReply
 			ok := srv.Call("ShardKV.MigrateShards", args, &reply)
-			kv.mu.Lock()
+			DPrintf("[FETCH SHARDS] resp [reply:%+v]", reply)
 			if ok && reply.WrongLeader == false && reply.Err == "" {
 				op := Op{
 					Opcode:              Optype_NewconfigMigrate,
@@ -289,12 +304,15 @@ func (kv *ShardKV) reconfigure() {
 	// for leader while taskShards is not empty
 	for !kv.killed() {
 		for kv.rf.IsLeader() {
+			//DPrintf("[CHECK...gid:%d maybe locked]", kv.gid)
 			kv.mu.Lock()
+			//DPrintf("[CHECK...gid:%d taskshards len]", kv.gid)
 			if len(kv.taskShards) != 0 {
+				//DPrintf("[CHECK...gid:%d taskshards !=0]", kv.gid)
 				// take a shard, find
 				taskGroup := make(map[int][]int) // map[gid] shards
 				for shard, _ := range kv.taskShards {
-					gid := kv.smConfig.Shards[shard]
+					gid := kv.lastSmConfig.Shards[shard]
 					taskGroup[gid] = append(taskGroup[gid], shard)
 				}
 				kv.mu.Unlock()
@@ -304,31 +322,35 @@ func (kv *ShardKV) reconfigure() {
 				}
 				doneCh := make(chan bool, jobNum)
 				for gid, shards := range taskGroup {
+					DPrintf("[RECONFIGURE] [gid:%d]starting kv.fetchShards [gid:%d] [shards:%v]", kv.gid, gid, shards)
 					go kv.fetchShards(gid, shards, doneCh)
 				}
 				doneAcc := 0
+				timeout := time.After(300 * time.Millisecond)
+			RECONFIG_FOR:
 				for {
 					select {
 					case <-doneCh:
 						doneAcc++
-						if doneAcc == jobNum {
+						if doneAcc >= jobNum {
 							//kv.mu.Lock()
 							//kv.reconfigureInProcess = false
 							//kv.mu.Unlock()
-							break
+							break RECONFIG_FOR
 						}
-					case <-time.After(300 * time.Millisecond):
-						DPrintf("[ShardKV Migration] reconfigure migration timeout")
-						break
+					case <-timeout:
+						DPrintf("[ShardKV Migration] reconfigure migration timeout on gid:%d", kv.gid)
+						break RECONFIG_FOR
 					}
 				}
 			} else {
 				//kv.reconfigureInProcess = false
 				kv.mu.Unlock()
 			}
+			//DPrintf("[DEBUG] code reached here for gid:%d", kv.gid)
 			time.Sleep(100 * time.Millisecond)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -357,6 +379,7 @@ func (kv *ShardKV) reconfigureStart() {
 	}
 	kv.acceptShards = acceptShards
 	kv.taskShards = taskShards
+	DPrintf("[reconfigure start] gid:%d acceptShards:%+v", kv.gid, kv.acceptShards)
 }
 func (kv *ShardKV) migrationApplyDuplicatePositive(shards []int) bool {
 	// test if shards are in taskShards
@@ -395,9 +418,14 @@ func (kv *ShardKV) apply() {
 		switch op.Opcode {
 		case Optype_NewconfigStart:
 			if kv.smConfig.Num < op.SmConfig.Num {
+				kv.lastSmConfig = kv.smConfig
 				kv.smConfig = op.SmConfig
 				// refuse some shards, add some shards to tasklist.
+
 				kv.reconfigureStart()
+				if m.IsLeader {
+					DPrintf("[SHARDKV APPLY gid %d confignum %d] applying new config !!! [taskShards:%v]", kv.gid, kv.smConfig.Num, kv.taskShards)
+				}
 				//kv.reconfigureInProcess = true
 			}
 			//if m.IsLeader {
@@ -423,11 +451,17 @@ func (kv *ShardKV) apply() {
 				}
 				for _, shard := range op.MigrateShards {
 					kv.acceptShards[shard] = true
+					delete(kv.taskShards, shard)
+				}
+				if m.IsLeader {
+					DPrintf("[SHARDKV APPLY MIGRATION gid %d confignum %d] applying migration for [shards:%v] taskshards now:%v", kv.gid, kv.smConfig.Num, op.MigrateShards, kv.taskShards)
 				}
 			}
 		case Optype_Get:
 			v, _ := kv.dict[op.K]
+
 			if m.IsLeader {
+				DPrintf("[DEBUG] gid:%d kv.dict:%+v", kv.gid, kv.dict)
 				ch, ok := kv.returnChanMap[m.CommandIndex]
 				if ok {
 					select {
@@ -480,7 +514,8 @@ func (kv *ShardKV) apply() {
 func (kv *ShardKV) pollShardmasterConfig() {
 	for !kv.killed() {
 		for !kv.killed() && kv.rf.IsLeader() && len(kv.taskShards) == 0 {
-			newconfig := kv.mck.Query(-1)
+			//DPrintf("[SHARDKV POLL] checking config...")
+			newconfig := kv.mck.Query(kv.smConfig.Num + 1)
 			//changed := false
 			//for i := 0; i < len(oldconfig.Shards); i++ {
 			//	if oldconfig.Shards[i] != newconfig.Shards[i] {
@@ -492,11 +527,13 @@ func (kv *ShardKV) pollShardmasterConfig() {
 			oldConfigNum := kv.smConfig.Num
 			kv.mu.Unlock()
 			if newconfig.Num != oldConfigNum {
+				DPrintf("[SHARDKV POLL CHANGE] found new config %d!!!", newconfig.Num)
 				// todo do something
 				op := Op{
 					Opcode:   Optype_NewconfigStart,
 					SmConfig: &newconfig,
 				}
+
 				kv.rf.Start(op)
 				//oldconfig = newconfig
 			}
@@ -562,6 +599,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		Groups: make(map[int][]string),
 	}
 	kv.lastSmConfig = kv.smConfig
+	kv.returnChanMap = make(map[int]chan ReturnChanData)
+	kv.clientSeqMap = make(map[int64]int)
+	kv.dict = make(map[string]string)
 	go kv.apply()
+	go kv.pollShardmasterConfig()
+	go kv.reconfigure()
 	return kv
 }
