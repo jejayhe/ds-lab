@@ -419,13 +419,20 @@ func (kv *ShardKV) apply() {
 		case Optype_NewconfigStart:
 			if kv.smConfig.Num < op.SmConfig.Num {
 				kv.lastSmConfig = kv.smConfig
+
 				kv.smConfig = op.SmConfig
 				// refuse some shards, add some shards to tasklist.
 
 				kv.reconfigureStart()
-				if m.IsLeader {
-					DPrintf("[SHARDKV APPLY gid %d confignum %d] applying new config !!! [taskShards:%v]", kv.gid, kv.smConfig.Num, kv.taskShards)
+				//kv.lastSmConfig = oldconfig
+				if kv.gid == 101 {
+					DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v].......................", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+
 				}
+				//DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v].......................", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+				//if m.IsLeader {
+				//	DPrintf("[SHARDKV APPLY gid %d server %d confignum %d] applying new config !!! [taskShards:%v]", kv.gid, kv.me, kv.smConfig.Num, kv.taskShards)
+				//}
 				//kv.reconfigureInProcess = true
 			}
 			//if m.IsLeader {
@@ -511,11 +518,20 @@ func (kv *ShardKV) apply() {
 	}
 }
 
+func (kv *ShardKV) taskShardsIsEmpty() bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return len(kv.taskShards) == 0
+}
+
 func (kv *ShardKV) pollShardmasterConfig() {
 	for !kv.killed() {
-		for !kv.killed() && kv.rf.IsLeader() && len(kv.taskShards) == 0 {
+		for !kv.killed() && kv.rf.IsLeader() && kv.taskShardsIsEmpty() {
 			//DPrintf("[SHARDKV POLL] checking config...")
-			newconfig := kv.mck.Query(kv.smConfig.Num + 1)
+			kv.mu.Lock()
+			oldNum := kv.smConfig.Num
+			kv.mu.Unlock()
+			newconfig := kv.mck.Query(oldNum + 1)
 			//changed := false
 			//for i := 0; i < len(oldconfig.Shards); i++ {
 			//	if oldconfig.Shards[i] != newconfig.Shards[i] {
@@ -523,11 +539,11 @@ func (kv *ShardKV) pollShardmasterConfig() {
 			//		break
 			//	}
 			//}
-			kv.mu.Lock()
-			oldConfigNum := kv.smConfig.Num
-			kv.mu.Unlock()
-			if newconfig.Num != oldConfigNum {
-				DPrintf("[SHARDKV POLL CHANGE] found new config %d!!!", newconfig.Num)
+			//kv.mu.Lock()
+			//oldConfigNum := kv.smConfig.Num
+			//kv.mu.Unlock()
+			if newconfig.Num > oldNum {
+				DPrintf("[SHARDKV POLL CHANGE gid:%d] found new config %d!!! oldNum:%d", kv.gid, newconfig.Num, oldNum)
 				// todo do something
 				op := Op{
 					Opcode:   Optype_NewconfigStart,
